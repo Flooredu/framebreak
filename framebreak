@@ -1,0 +1,1640 @@
+-- =========================================================================
+-- EGO  |  FRAMEBREAK
+-- External Lua script for the Project Vector API.
+-- Menu engine (theme, sidebar tabs, widgets, colour picker, snow) adapted
+-- from the Ego / Fust overlay so the look matches.
+--
+-- Tabs: Aimbot · ESP · Misc (empty) · Settings
+--   Aimbot  : camera aim / mouse aim / silent aim, FOV, smoothing, priority
+--   ESP     : box, skeleton, name, distance, health, held item, tracer
+--   Misc    : intentionally empty
+--   Settings: menu key, accent + chroma, opacity, HUD overlays, unload
+-- =========================================================================
+
+local theme = {
+  accent  = {0.25,0.72,1.00,1}, accent2={0.42,0.48,1.00,1}, accent2_base={0.42,0.48,1.00,1},
+  base    = {0.020,0.027,0.055,1}, base2={0.012,0.018,0.040,1},
+  panel   = {0.055,0.075,0.125,1}, panel_hi={0.085,0.110,0.175,1},
+  field   = {0.105,0.135,0.200,1}, field_hi={0.140,0.180,0.260,1},
+  rail    = {0.110,0.145,0.210,1}, line={0.200,0.290,0.420,1},
+  text    = {0.87,0.93,1.00,1}, sub={0.48,0.60,0.74,1}, faint={0.30,0.40,0.54,1},
+  ok      = {0.25,0.75,0.85,1}, bad={0.90,0.35,0.50,1},
+  round=4, opacity=1.0,
+}
+local function a(c,al) return {c[1],c[2],c[3],(c[4] or 1)*(al or 1)*theme.opacity} end
+local function mix(c1,c2,t) return {c1[1]+(c2[1]-c1[1])*t,c1[2]+(c2[2]-c1[2])*t,c1[3]+(c2[3]-c1[3])*t,(c1[4] or 1)+((c2[4] or 1)-(c1[4] or 1))*t} end
+local function clamp(v,lo,hi) return v<lo and lo or (v>hi and hi or v) end
+local function ease_out(t) t=clamp(t,0,1); local f=1-t; return 1-f*f*f end
+local function hsv(h,s,v) h=(h%1)*6; local i=math.floor(h); local f=h-i; local p=v*(1-s); local q=v*(1-s*f); local u=v*(1-s*(1-f))
+  if i==0 then return{v,u,p,1} elseif i==1 then return{q,v,p,1} elseif i==2 then return{p,v,u,1} elseif i==3 then return{p,q,v,1} elseif i==4 then return{u,p,v,1} else return{v,p,q,1} end end
+local function to_hsv(c) local r,g,b=c[1],c[2],c[3]; local mx=math.max(r,g,b); local mn=math.min(r,g,b); local d=mx-mn; local h=0
+  if d>0 then if mx==r then h=((g-b)/d)%6 elseif mx==g then h=(b-r)/d+2 else h=(r-g)/d+4 end h=h/6 end
+  return h, (mx==0 and 0 or d/mx), mx end
+
+local _dt=0.016
+local anim={}
+local FRAME=0
+local function approach(k,target,spd) local v=anim[k]; if v==nil then v=target end
+  v=v+(target-v)*clamp(_dt*(spd or 12),0,1); anim[k]=v; return v end
+
+-- one screen-size read per frame
+local SCR={w=1920,h=1080,f=-1}
+local function scr()
+  if SCR.f~=FRAME then
+    local w,h=draw.GetScreenSize()
+    SCR.w,SCR.h,SCR.f=w or 1920,h or 1080,FRAME
+  end
+  return SCR.w,SCR.h
+end
+local function mouse_pos() local x,y=utility.GetMousePos(); return x or 0, y or 0 end
+
+-- one clock read per frame
+local NOW={v=0,f=-1}
+local function now()
+  if NOW.f~=FRAME then
+    NOW.v=utility.GetTime and utility.GetTime() or os.clock()
+    NOW.f=FRAME
+  end
+  return NOW.v
+end
+
+-- IsKeyDown can hand back a number on some bindings; anything non-nil/false/0
+-- counts as down. pcall so a bad vk never takes the frame down.
+local function ekey(vk)
+  local ok,r=pcall(input.IsKeyDown,vk)
+  if not ok or r==nil or r==false or r==0 then return false end
+  return true
+end
+
+local VK={[0x01]="LMB",[0x02]="RMB",[0x04]="MMB",[0x05]="M4",[0x06]="M5",[0x08]="BACK",[0x09]="TAB",
+  [0x0D]="ENTER",[0x10]="SHIFT",[0x11]="CTRL",[0x12]="ALT",[0x1B]="ESC",[0x20]="SPACE",
+  [0x25]="LEFT",[0x26]="UP",[0x27]="RIGHT",[0x28]="DOWN",[0x2D]="INS",[0x2E]="DEL",
+  [0xA0]="LSHIFT",[0xA1]="RSHIFT",[0x43]="C",[0x46]="F",[0x51]="Q",[0x45]="E",[0x58]="X",[0x56]="V"}
+for i=0,9 do VK[0x30+i]=tostring(i) end
+for i=0,25 do VK[0x41+i]=string.char(65+i) end
+for i=1,12 do VK[0x6F+i]="F"..i end
+local function vkname(vk) if not vk or vk==0 then return "NONE" end return VK[vk] or string.format("0x%02X",vk) end
+
+local cfg={}; local col={}; local bind={}
+local cfg_dirty=false
+-- forward declaration: the Settings tab's Unload button closes over this and
+-- the real implementation is assigned near the bottom of the file.
+local UNLOAD
+
+-- =========================================================================
+-- SCHEMA
+-- =========================================================================
+local SCHEMA = {
+{name="Aimbot", groups={
+  {name="Aimbot", items={
+    {t="toggle",id="aim_on",label="Enable Aimbot",bind="aim_toggle"},
+    {t="bind",id="aim_key",label="Aim Key",default=0x02,show=function() return cfg.aim_on and not cfg.aim_always end},
+    {t="toggle",id="aim_always",label="Always Active",default=false,show=function() return cfg.aim_on end},
+    {t="combo",id="aim_bone",label="Aim Bone",items={"Head","Body","Root","Left Arm","Right Arm","Left Leg","Right Leg","Closest to Crosshair"},default=1,show=function() return cfg.aim_on end},
+    {t="combo",id="aim_priority",label="Target Priority",items={"Crosshair","Distance","Low HP"},default=1,show=function() return cfg.aim_on end},
+  }},
+  {name="Settings", items={
+    {t="combo",id="aim_fovstyle",label="FOV Style",items={"Circle","Box","Diamond","Corner Box"},default=1,show=function() return cfg.aim_on end},
+    {t="slider",id="aim_fov",label="FOV",min=10,max=60,default=40,suf="px",show=function() return cfg.aim_on end},
+    {t="slider",id="aim_range",label="Aimbot Range",min=20,max=1500,default=600,suf="m",show=function() return cfg.aim_on end},
+    {t="slider",id="aim_hc",label="Hit Chance",min=1,max=100,default=100,suf="%",show=function() return cfg.aim_on end},
+    {t="toggle",id="aim_tline",label="Target Line",default=true,color="c_tline",show=function() return cfg.aim_on end},
+    {t="toggle",id="aim_fovcircle",label="Show FOV",default=true,color="c_fov",show=function() return cfg.aim_on end},
+  }},
+}},
+{name="ESP", groups={
+  {name="Players", items={
+    {t="toggle",id="esp_on",label="Enable ESP",default=true},
+    {t="bind",id="esp_toggle",label="Toggle Key",default=0x56,show=function() return cfg.esp_on end},
+    {t="toggle",id="esp_box",label="Box",default=true,color="c_box",show=function() return cfg.esp_on end},
+    {t="combo",id="esp_boxstyle",label="Box Style",items={"Corner","Full"},default=1,show=function() return cfg.esp_on end},
+    {t="toggle",id="esp_skel",label="Skeleton",default=true,color="c_enemy",show=function() return cfg.esp_on end},
+    {t="toggle",id="esp_headdot",label="Head Dot",default=false,show=function() return cfg.esp_on end},
+    {t="toggle",id="esp_name",label="Name",default=true,color="c_name",show=function() return cfg.esp_on end},
+    {t="toggle",id="esp_dist",label="Distance",default=true,color="c_dist",show=function() return cfg.esp_on end},
+  }},
+  {name="Extra", items={
+    {t="toggle",id="esp_hp",label="Health Bar",default=true,show=function() return cfg.esp_on end},
+    {t="toggle",id="esp_hptext",label="Health Text",default=false,show=function() return cfg.esp_on and cfg.esp_hp end},
+    {t="toggle",id="esp_weapon",label="Held Item",default=true,color="c_weapon",show=function() return cfg.esp_on end},
+    {t="toggle",id="esp_tracer",label="Tracers",default=false,color="c_tracer",show=function() return cfg.esp_on end},
+    {t="slider",id="esp_maxdist",label="Player Range",min=0,max=1500,default=1500,suf="m",show=function() return cfg.esp_on end},
+    {t="slider",id="esp_textsize",label="Text Size",min=9,max=18,default=12,show=function() return cfg.esp_on end},
+  }},
+}},
+{name="Misc", groups={}},
+{name="Settings", groups={
+  {name="Interface", items={
+    {t="bind",id="menu_key",label="Menu Key",default=0xA1},
+    {t="color",id="c_accent",label="Accent"},
+    {t="toggle",id="accent_chroma",label="Chroma Accent",default=false},
+    {t="slider",id="ui_opacity",label="Menu Opacity",min=50,max=100,default=100,suf="%"},
+    {t="toggle",id="hud_mark",label="Watermark",default=true},
+    {t="toggle",id="hud_keys",label="Keybind List",default=true},
+    {t="toggle",id="hud_bar",label="Feature Bar",default=true},
+    {t="note",label="Menu Key toggles the window."},
+    {t="note",label="Drag the top bar to move it."},
+    {t="button",id="unload",label="Unload",_cb=function() if UNLOAD then UNLOAD() end end},
+  }},
+}},
+}
+
+local DEF_COL={
+  c_fov={0.45,0.78,1,1}, c_tline={0.45,0.78,1,1},
+  c_enemy={0.95,0.35,0.4,1}, c_box={0.45,0.78,1,1},
+  c_name={1,1,1,1}, c_weapon={1,0.88,0.55,1}, c_dist={0.87,0.93,1,1},
+  c_tracer={0.95,0.35,0.4,1},
+  c_accent={0.25,0.72,1.0,1},
+}
+
+bind.aim_toggle=0x46
+for _,tab in ipairs(SCHEMA) do for _,g in ipairs(tab.groups) do for _,it in ipairs(g.items) do
+  if it.t=="toggle" then cfg[it.id]=it.default or false
+  elseif it.t=="slider" then cfg[it.id]=it.default or it.min
+  elseif it.t=="combo" then cfg[it.id]=it.default or 1
+  elseif it.t=="bind" then bind[it.id]=it.default or 0
+  elseif it.t=="color" then
+    local dc=DEF_COL[it.id] or it.default
+    if dc and type(dc)=="table" then col[it.id]={dc[1] or 1,dc[2] or 1,dc[3] or 1,dc[4] or 1} else col[it.id]={1,1,1,1} end
+  end
+  if it.color then
+    local cid=it.color
+    local d=DEF_COL[cid]
+    if d and not col[cid] then col[cid]={d[1],d[2],d[3],d[4]} end
+  end
+end end end
+
+-- HUD panel positions are not schema rows: dragging a panel writes its absolute
+-- screen spot straight into cfg. -1 means "never placed" and falls back to the
+-- anchored corner. The saved profile carries them like any other setting.
+cfg.hud_mark_x,cfg.hud_mark_y=-1,-1
+cfg.hud_keys_x,cfg.hud_keys_y=-1,-1
+cfg.hud_bar_x,cfg.hud_bar_y=-1,-1
+
+-- =========================================================================
+-- UI STATE
+-- =========================================================================
+local ui={ open=true, x=140,y=90,w=600,h=460, tab=1,
+  drag=nil, capture=nil, capture_ok=false, picker=nil,
+  m={x=0,y=0,down=false,was=false,click=false}, menu_edge=false, appear=0 }
+
+-- text measurement memo (GetTextSize is a host call)
+local TS={w={},h={},n=0}
+local function ts(s,sz)
+  sz=sz or 12; s=tostring(s or "")
+  local e=TS.w[sz]
+  if not e then e={}; TS.w[sz]=e end
+  local w=e[s]
+  if w==nil then
+    local h
+    w,h=draw.GetTextSize(s,sz)
+    if w==nil then w=0 end
+    e[s]=w
+    if h then TS.h[sz]=h end
+    TS.n=TS.n+1
+    if TS.n>4000 then TS.w={}; TS.n=0 end
+  end
+  return w, TS.h[sz] or 12
+end
+local function tmid(x,y,h,s,c,sz) sz=sz or 12; local _,th=ts(s,sz); draw.Text(x,y+(h-th)*0.5,s,c,sz) end
+local function trt(xr,y,h,s,c,sz) sz=sz or 12; local tw,th2=ts(s,sz); draw.Text(xr-tw,y+(h-th2)*0.5,s,c,sz) return tw end
+
+local function inside(x,y,w,h) local m=ui.m return m.x>=x and m.x<=x+w and m.y>=y and m.y<=y+h end
+local function interactable() return ui.appear>0.9 and not ui.picker end
+local ROWH={toggle=26,slider=34,combo=28,bind=26,color=26,button=30,note=15}
+local function row_h(it) return ROWH[it.t] or 24 end
+local function row_visible(it) return it.show==nil or it.show() end
+
+local function glow(x,y,w,h,c,spread)
+  for i=(spread or 3),1,-1 do draw.RectFilled(x-i*1.5,y-i*1.5,w+i*3,h+i*3, a(c,0.05), 2) end
+end
+local function seg_quad(x1,y1,x2,y2,t)
+  local dx,dy=x2-x1,y2-y1
+  local len=math.sqrt(dx*dx+dy*dy)
+  if len<0.001 then return nil end
+  local nx,ny=-dy/len*t*0.5, dx/len*t*0.5
+  return {{x1+nx,y1+ny},{x2+nx,y2+ny},{x2-nx,y2-ny},{x1-nx,y1-ny}}
+end
+local function taper_seg(x1,y1,x2,y2,t,c,steps)
+  if not draw.PolyFilled then
+    draw.RectFilled(x1-t*0.5,y1-t*0.5,math.abs(x2-x1)+t,math.abs(y2-y1)+t,c,0); return
+  end
+  steps=steps or 8
+  for i=0,steps-1 do
+    local u0,u1=i/steps,(i+1)/steps
+    local q=seg_quad(x1+(x2-x1)*u0, y1+(y2-y1)*u0,
+                     x1+(x2-x1)*u1, y1+(y2-y1)*u1, t*(1-u0*0.6))
+    if q then pcall(draw.PolyFilled, q, {c[1],c[2],c[3],(c[4] or 1)*(1-u0*0.72)}) end
+  end
+end
+local function corners(x,y,w,h,len,c,th,cb)
+  th=th or 2; len=len or 11; cb=cb or c
+  local vs=th*1.8
+  local function arm(vx,vy,tx,ty,tone)
+    taper_seg(vx,vy,tx,ty,th*1.7,tone)
+    draw.RectFilled(vx-th*0.6, vy-th*0.6, vs, vs, tone, 1)
+  end
+  arm(x+2, y+th*0.5, x+len, y+th*0.5, c)
+  arm(x+th*0.5, y+2, x+th*0.5, y+len, c)
+  arm(x+w-2, y+th*0.5, x+w-len, y+th*0.5, c)
+  arm(x+w-th*0.5, y+2, x+w-th*0.5, y+len, c)
+  arm(x+2, y+h-th*0.5, x+len, y+h-th*0.5, cb)
+  arm(x+th*0.5, y+h-2, x+th*0.5, y+h-len, cb)
+  arm(x+w-2, y+h-th*0.5, x+w-len, y+h-th*0.5, cb)
+  arm(x+w-th*0.5, y+h-2, x+w-th*0.5, y+h-len, cb)
+end
+local function grad_v(x,y,w,h,c1,c2,steps) steps=steps or 12; local sh=h/steps
+  for i=0,steps-1 do draw.RectFilled(x,y+i*sh,w,sh+1,mix(c1,c2,i/(steps-1)),0) end end
+local function grad_h(x,y,w,h,c1,c2,steps) steps=steps or 20; local sw=w/steps
+  for i=0,steps-1 do draw.RectFilled(x+i*sw,y,sw+1,h,mix(c1,c2,i/(steps-1)),0) end end
+local function swatch_checker(x,y,w,h,c1,c2,s)
+  s=s or 4
+  local nx=math.floor(w/s); local ny=math.floor(h/s)
+  for i=0,nx-1 do for j=0,ny-1 do
+    draw.RectFilled(x+i*s,y+j*s,s,s,((i+j)%2==0) and c1 or c2,0)
+  end end
+end
+
+local PICKER_W,PICKER_H=250,230
+
+-- =========================================================================
+-- WIDGETS
+-- =========================================================================
+local function w_toggle(it,x,y,w)
+  local top=26; local v=cfg[it.id]
+  local bs=16; local bx,by=x+w-bs,y+(top-bs)*0.5
+  if it.color then
+    local cw,ch=22,12; local cx,cy=bx-6-cw,y+(top-ch)*0.5
+    local c=col[it.color] or {1,1,1,1}
+    local over=inside(cx-3,y,cw+6,top) and ui.appear>0.9
+    swatch_checker(cx,cy,cw,ch,{0.13,0.15,0.20,1},{0.08,0.09,0.13,1},3)
+    local al=(c[4] or 1)*(theme.opacity or 1)
+    grad_v(cx,cy,cw,ch,
+      {c[1]+(1-c[1])*0.26,c[2]+(1-c[2])*0.26,c[3]+(1-c[3])*0.26,al},
+      {c[1]*0.70,c[2]*0.70,c[3]*0.70,al}, 8)
+    draw.Rect(cx,cy,cw,ch, a(over and theme.accent or theme.line, over and 0.95 or 1), 3, 1)
+    if over then glow(cx,cy,cw,ch, theme.accent, 2) end
+    if over and ui.m.click then
+      local h,s,vv=to_hsv(c); local scw,sch=scr()
+      ui.picker={color=it.color,h=h,s=s,v=vv,al=c[4] or 1,
+        x=clamp(cx-150,8,scw-PICKER_W-8), y=clamp(cy+ch+10,8,sch-PICKER_H-8)}
+      ui.m.click=false
+    end
+  end
+  if it.bind then
+    -- inline key chip, sits left of the checkbox (and left of the colour swatch if any)
+    local bid=it.bind
+    local cap=ui.capture==bid
+    local label=cap and "..." or vkname(bind[bid])
+    local kw=math.max(34,ts(label,11)+12); local kh=16
+    local rx=bx-6
+    if it.color then rx=rx-22-6 end
+    local kx,ky=rx-kw,y+(top-kh)*0.5
+    local khot=inside(kx,ky,kw,kh) and interactable()
+    draw.RectFilled(kx,ky,kw,kh, a(cap and theme.accent or mix(theme.field,theme.field_hi,khot and 1 or 0),1),2)
+    draw.Rect(kx,ky,kw,kh, a(khot and theme.accent or theme.line, khot and 0.7 or 1), 2, 1)
+    tmid(kx+(kw-ts(label,11))*0.5,ky,kh,label, a(cap and {1,1,1,1} or theme.text,1),11)
+    if khot and ui.m.click then ui.capture=bid; ui.capture_ok=false; ui.m.click=false end
+  end
+  if inside(x,y,w,top) and ui.m.click and interactable() then cfg[it.id]=not v; cfg_dirty=true; ui.m.click=false end
+  local hot=inside(x,y,w,top)
+  local lsz=13
+  while lsz>8 and ts(it.label,lsz)+24>w do lsz=lsz-1 end
+  tmid(x,y,top,it.label, a(theme.text, v and 1 or 0.8),lsz)
+  local rv=approach("tg"..it.id, v and 1 or 0, 18)
+  if hot and v==false then draw.RectFilled(x,y,w,top, {1,1,1,0.02},0) end
+  if v then glow(bx,by,bs,bs, theme.accent, 2) end
+  draw.RectFilled(bx,by,bs,bs, a(mix(theme.field,theme.accent,rv*0.9),1), 2)
+  draw.Rect(bx,by,bs,bs, a(mix(theme.line,theme.accent,rv),1), 2, 1)
+  if rv>0.02 then
+    local pad=3; local s=(bs-pad*2)*rv; local ox,oy=bx+pad,by+pad
+    local ck={ seg_quad(ox,oy+s*0.50, ox+s*0.40, oy+s*0.88, s*0.24),
+               seg_quad(ox+s*0.40, oy+s*0.88, ox+s, oy+s*0.14, s*0.24) }
+    local cc=a(theme.base, rv)
+    for _,q in ipairs(ck) do
+      if q then
+        if draw.PolyFilled then pcall(draw.PolyFilled, q, cc)
+        else draw.RectFilled(ox,oy+s*0.5,s*0.4,s*0.38, cc, 0) end
+      end
+    end
+  end
+  return top
+end
+
+local function w_slider(it,x,y,w)
+  local top=34; local v=cfg[it.id]
+  local disp=it._disp
+  if it._dv~=v then
+    it._dv=v
+    disp=string.format("%.0f",v)..(it.suf and (" "..it.suf) or "")
+    it._disp=disp
+  end
+  local dw=ts(disp,12)
+  local lsz=13
+  while lsz>9 and ts(it.label,lsz)+dw+10>w do lsz=lsz-1 end
+  tmid(x,y,16,it.label, a(theme.sub,1),lsz)
+  draw.Text(x+w-dw,y+2,disp, a(theme.text,1),12)
+  local ty2,th=y+21,4
+  draw.RectFilled(x,ty2,w,th, a(theme.rail,1), 1)
+  for i=0,4 do draw.RectFilled(x+w*(i/4), ty2+th+2, 1, 3, a(theme.line,0.65), 0) end
+  local f=clamp((v-it.min)/(it.max-it.min),0,1); local fill=approach("sl"..it.id,f,18)
+  if w*fill>1 then grad_v(x,ty2,w*fill,th, theme.accent, theme.accent2, 8) end
+  local ks=10; local kx=x+w*fill-ks*0.5; local ky=ty2+th*0.5-ks*0.5
+  glow(kx,ky,ks,ks, mix(theme.accent,theme.accent2,0.5), 2)
+  if draw.PolyFilled then pcall(draw.PolyFilled, {{kx+ks*0.5,ky},{kx+ks,ky+ks*0.5},{kx+ks*0.5,ky+ks},{kx,ky+ks*0.5}}, a(theme.text,1))
+  else draw.RectFilled(kx,ky,ks,ks, a(theme.text,1), 2) end
+  if inside(x,y,w,top) and ui.m.click and not ui.drag and interactable() then ui.drag={k="slider",id=it.id,x=x,w=w,min=it.min,max=it.max} end
+  if ui.drag and ui.drag.k=="slider" and ui.drag.id==it.id then
+    if ui.m.down then local nv=math.floor(it.min+clamp((ui.m.x-x)/w,0,1)*(it.max-it.min)+0.5); if nv~=cfg[it.id] then cfg[it.id]=nv; cfg_dirty=true end else ui.drag=nil end
+  end
+  return top
+end
+
+local function w_combo(it,x,y,w)
+  local top=28; local bw=math.min(130, math.floor(w*0.52)); local bh=22; local bx,by=x+w-bw,y+(top-bh)*0.5
+  tmid(x,y,top,it.label, a(theme.sub,1),13)
+  local hot=inside(bx,by,bw,bh) and interactable()
+  draw.RectFilled(bx,by,bw,bh, a(mix(theme.field,theme.field_hi,hot and 1 or 0),1),2)
+  draw.Rect(bx,by,bw,bh, a(hot and theme.accent or theme.line, hot and 0.7 or 1), 2, 1)
+  tmid(bx+8,by,bh, it.items[cfg[it.id]] or "?", a(theme.text,1),12)
+  local ax0,ay0=bx+bw-15, by+bh*0.5-2
+  for i=0,2 do
+    draw.RectFilled(ax0+i*2, ay0+i*2, 1.5, 1.5, a(theme.accent,0.8), 0)
+    draw.RectFilled(ax0+i*2, ay0+7-i*2, 1.5, 1.5, a(theme.accent,0.8), 0)
+  end
+  if hot and ui.m.click then ui.picker={combo=it.id,items=it.items,x=bx,y=by+bh+2,w=bw} ui.m.click=false end
+  return top
+end
+
+local function w_bind(it,x,y,w)
+  local top=26; local cap=ui.capture==it.id; local label=cap and "..." or vkname(bind[it.id])
+  local tw=ts(label,11); local bw=math.max(40,tw+16); local bx,by,bh=x+w-bw,y+(top-18)*0.5,18
+  tmid(x,y,top,it.label, a(theme.text,0.9),13)
+  local hot=inside(bx,by,bw,bh) and interactable()
+  draw.RectFilled(bx,by,bw,bh, a(cap and theme.accent or mix(theme.field,theme.field_hi,hot and 1 or 0),1),2)
+  draw.Rect(bx,by,bw,bh, a(hot and theme.accent or theme.line, hot and 0.7 or 1), 2, 1)
+  tmid(bx+8,by,bh,label, a(cap and {1,1,1,1} or theme.text,1),11)
+  if hot and ui.m.click then ui.capture=it.id; ui.capture_ok=false; ui.m.click=false end
+  return top
+end
+
+local PRESETS={{1,1,1,1},{0.99,0.42,0.45,1},{1,0.62,0.2,1},{1,0.87,0.3,1},{0.55,0.97,0.5,1},
+  {0.35,0.95,0.88,1},{0.45,0.78,1,1},{0.62,0.56,1,1},{0.9,0.52,1,1},{0.62,0.69,0.8,1}}
+
+local function w_color(it,x,y,w)
+  local top=28; local sw,sh=46,18; local sx,sy=x+w-sw,y+(top-sh)*0.5
+  tmid(x,y,top,it.label, a(theme.text,0.9),13)
+  local c=col[it.id] or {1,1,1,1}
+  local over=inside(sx-4,y,sw+8,top)
+  local hot=over and ui.appear>0.9
+  swatch_checker(sx,sy,sw,sh,{0.13,0.15,0.20,1},{0.08,0.09,0.13,1},4)
+  local al=(c[4] or 1)*(theme.opacity or 1)
+  grad_v(sx,sy,sw,sh,
+    {c[1]+(1-c[1])*0.26,c[2]+(1-c[2])*0.26,c[3]+(1-c[3])*0.26,al},
+    {c[1]*0.70,c[2]*0.70,c[3]*0.70,al}, 12)
+  draw.Rect(sx,sy,sw,sh, a(hot and theme.accent or theme.line, hot and 0.95 or 1), 3, 1)
+  if hot then glow(sx,sy,sw,sh, theme.accent, 2) end
+  if hot and ui.m.click then
+    local h,s,v=to_hsv(c)
+    local scw,sch=scr()
+    ui.picker={color=it.id,h=h,s=s,v=v,al=c[4] or 1,
+      x=clamp(sx-160,8,scw-PICKER_W-8), y=clamp(sy+sh+10,8,sch-PICKER_H-8)}
+    ui.m.click=false
+  end
+  return top
+end
+
+local function w_note(it,x,y,w) tmid(x,y,15,it.label, a(theme.faint,1),11); return 15 end
+local function w_button(it,x,y,w)
+  local top=30; local bh=24; local by=y+(top-bh)*0.5
+  local hot=inside(x,by,w,bh) and interactable()
+  local danger=(it.id=="unload")
+  local tone=danger and theme.bad or theme.accent
+  draw.RectFilled(x,by,w,bh, a(mix(theme.field,tone,hot and 0.28 or 0),1),2)
+  draw.Rect(x,by,w,bh, a(hot and tone or theme.line, hot and 0.9 or 1), 2, 1)
+  local tw=ts(it.label,12); tmid(x+(w-tw)*0.5,by,bh,it.label, a(hot and tone or theme.text,1),12)
+  if hot and ui.m.click then ui.m.click=false; if it._cb then it._cb() end end
+  return top
+end
+local WI={toggle=w_toggle,slider=w_slider,combo=w_combo,bind=w_bind,color=w_color,note=w_note,button=w_button}
+
+local function picker_draw()
+  local p=ui.picker; if not p then return end
+  if p.combo then
+    local ph=#p.items*24+6
+    if ui.m.click then
+      if inside(p.x,p.y,p.w,ph) then
+        local idx=math.floor((ui.m.y-p.y-3)/24)+1
+        if idx>=1 and idx<=#p.items then cfg[p.combo]=idx; cfg_dirty=true end
+      end
+      ui.picker=nil; ui.m.click=false
+    end
+    draw.RectFilled(p.x,p.y,p.w,ph, a(theme.panel_hi,1),2)
+    draw.Rect(p.x,p.y,p.w,ph,a(theme.accent,0.6),2,1)
+    for i,item in ipairs(p.items) do
+      local iy=p.y+3+(i-1)*24; local hot=inside(p.x,iy,p.w,24)
+      if hot then draw.RectFilled(p.x+2,iy,p.w-4,24,a(theme.accent,0.22),0) end
+      tmid(p.x+10,iy,24,item, a(theme.text, hot and 1 or 0.8),12)
+    end
+    return
+  end
+  local x,y=p.x,p.y; local w,h=PICKER_W,PICKER_H
+  if ui.m.click and not inside(x,y,w,h) then ui.picker=nil; ui.m.click=false; return end
+  for i=4,1,-1 do draw.RectFilled(x-i*2.5,y-i*1.5,w+i*5,h+i*4,{0,0,0,0.10*theme.opacity},6+i*2) end
+  draw.RectFilled(x,y,w,h, a(theme.panel_hi,0.99),6)
+  draw.Rect(x,y,w,h, a(theme.accent,0.55),6,1)
+  draw.Rect(x+2,y+2,w-4,h-4, a(theme.line,0.16),6,1)
+  local pad=12
+  local svx,svy=x+pad,y+pad; local svw,svh=200,120
+  local huecol=hsv(p.h,1,1)
+  grad_h(svx,svy,svw,svh,{1,1,1,1},huecol,48)
+  for i=0,23 do draw.RectFilled(svx,svy+i*(svh/24),svw,svh/24+1,{0,0,0,i/23},0) end
+  draw.Rect(svx,svy,svw,svh,a(theme.line,1),0,1)
+  if inside(svx,svy,svw,svh) and ui.m.click then p.drag="sv" end
+  if p.drag=="sv" then p.s=clamp((ui.m.x-svx)/svw,0,1); p.v=clamp(1-(ui.m.y-svy)/svh,0,1) end
+  local hx1,hy1=svx+p.s*svw, svy+(1-p.v)*svh
+  draw.Circle(hx1,hy1,6.5,{0,0,0,0.75},16,2.5)
+  draw.Circle(hx1,hy1,5.5,{1,1,1,1},16,1.5)
+  local hx,hy=svx+svw+8,svy; local hw2,hh=18,svh
+  for i=0,47 do draw.RectFilled(hx,hy+i*(hh/48),hw2,hh/48+1,hsv(i/48,1,1),0) end
+  draw.Rect(hx,hy,hw2,hh,a(theme.line,1),0,1)
+  if inside(hx,hy,hw2,hh) and ui.m.click then p.drag="hue" end
+  if p.drag=="hue" then p.h=clamp((ui.m.y-hy)/hh,0,1) end
+  local hy2=hy+p.h*hh
+  draw.Rect(hx-3,hy2-3,hw2+6,6,{0,0,0,0.6},1,2.5)
+  draw.Rect(hx-3,hy2-3,hw2+6,6,{1,1,1,1},1,1.5)
+  local ax,ay=svx,svy+svh+10; local aw,ah=svw+8+hw2,12
+  swatch_checker(ax,ay,aw,ah,{0.13,0.15,0.20,1},{0.08,0.09,0.13,1},4)
+  grad_h(ax,ay,aw,ah,{huecol[1],huecol[2],huecol[3],0},{huecol[1],huecol[2],huecol[3],1},40)
+  draw.Rect(ax,ay,aw,ah,a(theme.line,1),0,1)
+  if inside(ax,ay,aw,ah) and ui.m.click then p.drag="al" end
+  if p.drag=="al" then p.al=clamp((ui.m.x-ax)/aw,0,1) end
+  local axp=ax+p.al*aw
+  draw.Rect(axp-2,ay-3,4,ah+6,{0,0,0,0.6},1,2.5)
+  draw.Rect(axp-2,ay-3,4,ah+6,{1,1,1,1},1,1.5)
+  local fin=hsv(p.h,p.s,p.v); fin[4]=p.al
+  col[p.color]={fin[1],fin[2],fin[3],fin[4]}; cfg_dirty=true
+  if p.color=="c_accent" then theme.accent={fin[1],fin[2],fin[3],1} end
+  local px,py=svx,ay+ah+10
+  swatch_checker(px,py,44,26,{0.13,0.15,0.20,1},{0.08,0.09,0.13,1},4)
+  draw.RectFilled(px,py,44,26,fin,3)
+  draw.Rect(px,py,44,26,a(theme.line,1),3,1)
+  local r8=math.floor(fin[1]*255); local g8=math.floor(fin[2]*255); local b8=math.floor(fin[3]*255)
+  tmid(px+52,py,13,string.format("#%02X%02X%02X",r8,g8,b8),a(theme.text,1),12)
+  tmid(px+52,py+13,13,string.format("A %d%%   R %d  G %d  B %d",math.floor(p.al*100),r8,g8,b8),a(theme.faint,1),10)
+  local pry=py+34
+  for i,pc in ipairs(PRESETS) do
+    local bx=svx+(i-1)*21
+    draw.RectFilled(bx,pry,18,18,pc,3)
+    draw.Rect(bx,pry,18,18,a(theme.line,1),3,1)
+    if inside(bx,pry,18,18) and ui.m.click then
+      p.h,p.s,p.v=to_hsv(pc); p.al=pc[4] or 1; ui.m.click=false
+    end
+  end
+  if not ui.m.down then p.drag=nil end
+end
+
+local TOPBAR_H=38
+local SIDEBAR_W=132
+local PAD=14
+local GUT=12
+
+-- snowfall for the menu
+local SNOW={ parts={}, n=0, w=0, cg={1,1,1,1}, cl={1,1,1,1}, cc={1,1,1,1} }
+function SNOW.seed(n,w,h)
+  SNOW.n=n; SNOW.w=w
+  local p=SNOW.parts
+  for i=1,n do
+    if not p[i] then p[i]={} end
+    local f=p[i]
+    local z=math.random()
+    f.z=z
+    f.x=math.random()*w
+    f.y=math.random()*h
+    f.r=0.55+z*2.4+math.random()*0.5
+    f.vy=9+z*46+math.random()*8
+    f.amp=2+z*11
+    f.ph=math.random()*6.283
+    f.sp=0.45+z*0.9+math.random()*0.35
+    f.al=0.16+z*0.58
+    f.vx=(math.random()-0.5)*(3+z*10)
+    f.tw=math.random()*6.283
+    f.rot=math.random()*6.283
+    f.spin=(math.random()-0.5)*1.1
+  end
+  for i=n+1,#p do p[i]=nil end
+  table.sort(p,function(a,b) return a.z<b.z end)
+end
+function SNOW.update(n,w,h)
+  if n~=SNOW.n then SNOW.seed(n,w,h)
+  elseif w~=SNOW.w then
+    local s=SNOW.w>0 and (w/SNOW.w) or 1
+    for i=1,SNOW.n do SNOW.parts[i].x=SNOW.parts[i].x*s end
+    SNOW.w=w
+  end
+  local p=SNOW.parts
+  for i=1,SNOW.n do
+    local f=p[i]
+    f.y=f.y+f.vy*_dt
+    f.x=f.x+f.vx*_dt
+    f.rot=f.rot+f.spin*_dt
+    if f.y>h+3 then f.y=-3; f.x=math.random()*w end
+    if f.x<-4 then f.x=f.x+w+8 elseif f.x>w+4 then f.x=f.x-w-8 end
+  end
+end
+function SNOW.draw(x,y,w,h,alpha)
+  local p=SNOW.parts
+  local tm=now()
+  local ac=theme.accent; local ac2=theme.accent2
+  local gc,lc,cc=SNOW.cg,SNOW.cl,SNOW.cc
+  gc[1]=ac[1]+(ac2[1]-ac[1])*0.35; gc[2]=ac[2]+(ac2[2]-ac[2])*0.35; gc[3]=ac[3]+(ac2[3]-ac[3])*0.35
+  lc[1]=ac[1]+(1-ac[1])*0.12; lc[2]=ac[2]+(1-ac[2])*0.12; lc[3]=ac[3]+(1-ac[3])*0.12
+  cc[1]=ac[1]+(1-ac[1])*0.52; cc[2]=ac[2]+(1-ac[2])*0.52; cc[3]=ac[3]+(1-ac[3])*0.52
+  for i=1,SNOW.n do
+    local f=p[i]
+    local fx=x+f.x+math.sin(tm*f.sp+f.ph)*f.amp
+    local fy=y+f.y
+    if fy>=y-3 and fy<=y+h+3 and fx>=x-3 and fx<=x+w+3 then
+      local al=f.al*alpha*(0.82+0.18*math.sin(tm*1.6+f.tw))
+      if f.z>0.55 then
+        gc[4]=al*0.22
+        draw.CircleFilled(fx,fy,f.r*(2.0+f.z),gc,8)
+      end
+      if f.z>0.28 then
+        local L=f.r*(2.4+f.z)
+        lc[4]=al*0.92
+        local c1,s1=math.cos(f.rot),math.sin(f.rot)
+        local c2,s2=0.5*c1-0.8660254*s1, 0.8660254*c1+0.5*s1
+        local c3,s3=-0.5*c1-0.8660254*s1, 0.8660254*c1-0.5*s1
+        draw.Line(fx-c1*L,fy-s1*L,fx+c1*L,fy+s1*L,lc,1)
+        draw.Line(fx-c2*L,fy-s2*L,fx+c2*L,fy+s2*L,lc,1)
+        draw.Line(fx-c3*L,fy-s3*L,fx+c3*L,fy+s3*L,lc,1)
+        cc[4]=al
+        draw.CircleFilled(fx,fy,math.max(0.7,f.r*0.32),cc,6)
+      else
+        lc[4]=al
+        draw.CircleFilled(fx,fy,f.r,lc,6)
+      end
+    end
+  end
+end
+
+-- =========================================================================
+-- MENU
+-- =========================================================================
+local function draw_menu()
+  ui.win_grab=nil
+  local e=ease_out(ui.appear); if e<0.01 then return end
+  theme.opacity=e*((cfg.ui_opacity or 100)/100)
+  local x,y,w=ui.x,ui.y,ui.w
+  local tab=SCHEMA[ui.tab] or SCHEMA[1]
+  local cx=x+SIDEBAR_W
+  local cw=w-SIDEBAR_W
+  local ctop=y+TOPBAR_H
+  local ng=#tab.groups
+  local ncol=ng>1 and 2 or 1
+  local colw=(cw-PAD*2-GUT*(ncol-1))/ncol
+  local colx={cx+PAD, cx+PAD+colw+GUT}
+
+  local placed=ui.placed
+  if not placed then placed={}; ui.placed=placed end
+  local coly=ui.coly
+  if not coly then coly={0,0}; ui.coly=coly end
+  coly[1]=0; coly[2]=0
+  local pn=0
+  for _,g in ipairs(tab.groups) do
+    local gh=30; for _,it in ipairs(g.items) do if row_visible(it) then gh=gh+row_h(it) end end
+    local c=(coly[1]<=coly[2]) and 1 or 2
+    if c>ncol then c=ncol end
+    pn=pn+1
+    local pl=placed[pn]
+    if not pl then pl={}; placed[pn]=pl end
+    pl.g=g; pl.c=c; pl.oy=coly[c]; pl.h=gh
+    coly[c]=coly[c]+gh+GUT
+  end
+  for i=pn+1,#placed do placed[i]=nil end
+  local contentH=math.max(coly[1],coly[2]); if contentH>0 then contentH=contentH-GUT end
+  local sideH=6+#SCHEMA*26
+  ui.h=approach("winh", TOPBAR_H+math.max(contentH,sideH,110)+PAD, 18)
+  local h=ui.h
+  SNOW.update(48,w,h)
+
+  for i=4,1,-1 do draw.RectFilled(x-i*2.5, y-i*1.5, w+i*5, h+i*4, {0,0,0,0.09*theme.opacity}, theme.round+i*2) end
+  draw.RectFilled(x,y,w,h, {theme.base[1],theme.base[2],theme.base[3],0.94*theme.opacity}, theme.round)
+  draw.RectFilled(x+theme.round,y,SIDEBAR_W,h-TOPBAR_H, {theme.base2[1],theme.base2[2],theme.base2[3],0.5*theme.opacity}, 0)
+  grad_v(x+theme.round,y,w-theme.round*2,TOPBAR_H,
+    {theme.panel_hi[1],theme.panel_hi[2],theme.panel_hi[3],0.34*theme.opacity},
+    {theme.panel[1],theme.panel[2],theme.panel[3],0.12*theme.opacity}, 48)
+  draw.Rect(x,y,w,h, a(theme.line,0.95), theme.round, 1)
+  draw.Rect(x+3,y+3,w-6,h-6, a(theme.line,0.22), theme.round, 1)
+  draw.Line(x+theme.round, y+TOPBAR_H, x+w-theme.round, y+TOPBAR_H, a(theme.line,0.6), 1)
+  draw.Line(x+SIDEBAR_W, y+TOPBAR_H, x+SIDEBAR_W, y+h-theme.round, a(theme.line,0.5), 1)
+  draw.RectFilled(x+theme.round, y, w-theme.round*2, 2, a(mix(theme.accent,theme.accent2,0.5), 0.92*e), 0)
+  corners(x,y,w,h, 18, a(mix(theme.accent,theme.accent2,0.5), 0.95*e), 2, a(mix(theme.accent,theme.accent2,0.5), 0.5*e))
+
+  local lw=ts("Ego",17)
+  draw.Text(x+PAD,y+11,"Ego", a(theme.text,1),17)
+  local dx,dy=x+PAD+lw+11, y+19
+  if draw.PolyFilled then pcall(draw.PolyFilled, {{dx,dy-4},{dx+4,dy},{dx,dy+4},{dx-4,dy}}, a(theme.accent,1))
+  else draw.RectFilled(dx-3,dy-3,6,6, a(theme.accent,1), 1) end
+  tmid(dx+11, y, TOPBAR_H, "Framebreak", a(theme.sub,1), 12)
+  trt(x+w-PAD,y+12,16,"v1.0", a(theme.faint,1),10)
+
+  local sy=ctop+6
+  for i,tab2 in ipairs(SCHEMA) do
+    local label=string.lower(tab2.name); local ty=sy+(i-1)*26
+    local hot=inside(x+8,ty,SIDEBAR_W-16,24) and interactable()
+    if hot and ui.m.click then ui.tab=i; ui.m.click=false end
+    local act=approach("tab"..i,(ui.tab==i) and 1 or 0,18)
+    if act>0.01 then
+      draw.RectFilled(x+8,ty,SIDEBAR_W-16,24, a(theme.accent, 0.12*act), 2)
+      local wq={{x+8,ty},{x+11,ty},{x+15,ty+24},{x+12,ty+24}}
+      if draw.PolyFilled then pcall(draw.PolyFilled, wq, a(theme.accent,act)) else draw.RectFilled(x+8,ty,3,24, a(theme.accent,act), 0) end
+      local qx, qy = x+SIDEBAR_W-19, ty+12
+      for k=0,2 do
+        draw.RectFilled(qx+k*2, qy-4+k*2, 1.4,1.4, a(theme.accent,act*0.8),0)
+        draw.RectFilled(qx+k*2, qy+4-k*2, 1.4,1.4, a(theme.accent,act*0.8),0)
+      end
+    end
+    tmid(x+18,ty,24,label, a(mix(theme.faint,theme.text,math.max(act, hot and 0.5 or 0)),1),12)
+  end
+
+  local secn=0
+  for _,pl in ipairs(placed) do
+    local g=pl.g; local gx=colx[pl.c] or colx[1]; local gy=ctop+pl.oy
+    secn=secn+1
+    local num=string.format("%02d",secn)
+    local nw=ts(num,10)
+    draw.RectFilled(gx,gy, nw+7, 13, a(theme.accent,0.16), 2)
+    draw.Text(gx+4, gy+2, num, a(theme.accent,0.95), 10)
+    local caps=string.upper(g.name); local hw=ts(caps,11)
+    draw.Text(gx+nw+13, gy+1, caps, a(theme.faint,1), 11)
+    draw.Line(gx+nw+hw+21, gy+9, gx+colw, gy+9, a(theme.line,0.5), 1)
+    local iy=gy+18
+    for _,it in ipairs(g.items) do
+      if row_visible(it) then local f=WI[it.t]; if f then f(it,gx,iy,colw) end iy=iy+row_h(it) end
+    end
+  end
+  if ui.m.click and not ui.drag and not ui.picker and inside(x,y,w,h) then
+    ui.win_grab={ox=ui.m.x-x,oy=ui.m.y-y}
+  end
+  picker_draw()
+  SNOW.draw(x,y,w,h,theme.opacity)
+end
+
+local function update_input()
+  ui.m.x,ui.m.y=mouse_pos()
+  local d=ekey(0x01)
+  ui.m.click=d and not ui.m.was
+  ui.m.down=d; ui.m.was=d
+  if not d and ui.drag and ui.drag.k~="slider" then ui.drag=nil end
+  if ui.drag and ui.drag.k=="win" then
+    local sw,sh=scr()
+    ui.x=clamp(ui.m.x-ui.drag.ox,0,math.max(0,sw-ui.w))
+    ui.y=clamp(ui.m.y-ui.drag.oy,0,math.max(0,sh-ui.h))
+  end
+  -- HUD panels drag by absolute screen position. run_hud starts the drag with a
+  -- hud_* key and this applies it while the button is held.
+  local dk=ui.drag and ui.drag.k
+  if dk and string.sub(dk,1,4)=="hud_" then
+    local sw,sh=scr()
+    cfg[dk.."_x"]=clamp(ui.m.x-ui.drag.ox,0,math.max(0,sw))
+    cfg[dk.."_y"]=clamp(ui.m.y-ui.drag.oy,0,math.max(0,sh))
+    cfg_dirty=true
+  end
+  local held=ekey(bind.menu_key or 0xA1)
+  if held and not ui.menu_edge then ui.open=not ui.open; ui.picker=nil; ui.capture=nil end
+  ui.menu_edge=held
+
+  local ek=bind.esp_toggle or 0
+  local eh=(ek~=0) and ekey(ek) or false
+  if eh and not ui.esp_edge and not ui.capture then cfg.esp_on=not cfg.esp_on; cfg_dirty=true end
+  ui.esp_edge=eh
+
+  local ak=bind.aim_toggle or 0
+  local ah=(ak~=0) and ekey(ak) or false
+  if ah and not ui.aim_edge and not ui.capture then cfg.aim_on=not cfg.aim_on; cfg_dirty=true end
+  ui.aim_edge=ah
+
+  if ui.capture then
+    if not ui.capture_ok then if not ekey(0x01) then ui.capture_ok=true end return end
+    if ekey(0x1B) then bind[ui.capture]=0; cfg_dirty=true; ui.capture=nil; return end
+    for vk=0x01,0xFE do if vk~=0x1B and ekey(vk) then bind[ui.capture]=vk; cfg_dirty=true; ui.capture=nil; return end end
+  end
+end
+
+-- =========================================================================
+-- PLAYER / VIEW HELPERS
+-- =========================================================================
+local function getfield(o,k) return o[k] end
+
+local V={frame=-1}
+local function view()
+  local v=V
+  if v.frame==FRAME then return v end
+  v.frame=FRAME
+  local lp
+  if entity and entity.GetLocalPlayer then
+    local ok,r=pcall(entity.GetLocalPlayer); if ok then lp=r end
+  end
+  v.lp=lp
+  local cx,cy,cz,lx,ly,lz,fov,cpos,clook
+  if camera then
+    local ok,r=pcall(camera.GetPosition)
+    if ok and r then cpos=r; cx,cy,cz=r.X,r.Y,r.Z end
+    ok,r=pcall(camera.GetLookVector)
+    if ok and r then clook=r; lx,ly,lz=r.X,r.Y,r.Z end
+    ok,r=pcall(camera.GetFov)
+    if ok then fov=r end
+  end
+  if type(fov)~="number" or fov<10 or fov>170 then fov=70 end
+  v.cpos,v.clook=cpos,clook
+  v.cx,v.cy,v.cz=cx,cy,cz
+  v.lx,v.ly,v.lz=lx,ly,lz
+  v.fov=fov
+  local sw,sh=scr()
+  v.sw,v.sh=sw,sh
+  v.mx,v.my=sw*0.5,sh*0.5
+  return v
+end
+
+local PL={frame=-1,list=nil}
+local function players()
+  local c=PL
+  if c.frame~=FRAME then
+    c.frame=FRAME
+    local ok,r=pcall(entity.GetPlayers)
+    c.list=(ok and type(r)=="table") and r or nil
+  end
+  return c.list
+end
+
+local BM={frame=-1}
+local function bones_of(p)
+  local c=BM
+  if c.frame~=FRAME then
+    for k in pairs(c) do c[k]=nil end
+    c.frame=FRAME
+  end
+  local d=c[p]
+  if d==nil then
+    local ok,r=pcall(p.GetBonesScreen,p)
+    d=(ok and type(r)=="table") and r or false
+    c[p]=d
+  end
+  if d==false then return nil end
+  return d
+end
+
+local function bone_xy(p,name)
+  local b=bones_of(p)
+  if not b then return nil end
+  local e=b[name]
+  if type(e)~="table" then return nil end
+  local x,y=e[1],e[2]
+  if x==x and y==y then return x,y end
+end
+
+local function charof(p)
+  local ok,c=pcall(getfield,p,"Character")
+  if ok and c then return c end
+  local ok2,g=pcall(getfield,p,"GetCharacter")
+  if ok2 and type(g)=="function" then local ok3,r=pcall(g,p); if ok3 then return r end end
+end
+
+local function findchild(o,n)
+  if not o then return nil end
+  local ok,r=pcall(o.FindFirstChild,o,n)
+  if ok then return r end
+end
+
+local function pdist(p)
+  local ok,r=pcall(p.DistanceTo,p)
+  if ok and type(r)=="number" then return r end
+end
+
+local function phealth(p)
+  local ok,r=pcall(getfield,p,"Health"); if ok then return tonumber(r) or 0 end
+  return 0
+end
+
+local function pmaxhealth(p)
+  local ok,r=pcall(getfield,p,"MaxHealth"); if ok then return tonumber(r) or 100 end
+  return 100
+end
+
+-- =========================================================================
+-- ESP
+-- =========================================================================
+local SKEL_PATHS={
+  {"Head","UpperTorso","LowerTorso","HumanoidRootPart"},
+  {"UpperTorso","LeftUpperArm","LeftLowerArm","LeftHand"},
+  {"UpperTorso","RightUpperArm","RightLowerArm","RightHand"},
+  {"LowerTorso","LeftUpperLeg","LeftLowerLeg","LeftFoot"},
+  {"LowerTorso","RightUpperLeg","RightLowerLeg","RightFoot"},
+}
+
+-- ---- target discovery -----------------------------------------------------
+-- Does not depend on entity.GetPlayers(). Targets come from three sources,
+-- merged by instance address and rebuilt twice a second:
+--   1. entity cache (full-featured when it works)
+--   2. game.Players -> Player.Character
+--   3. any Humanoid anywhere in Workspace (bots/NPCs, or characters a mode
+--      parents somewhere unusual such as Workspace.Arenas.*)
+local PART_NAMES={"Torso","Head","UpperTorso","LowerTorso","HumanoidRootPart",
+  "LeftUpperArm","LeftLowerArm","LeftHand","RightUpperArm","RightLowerArm","RightHand",
+  "LeftUpperLeg","LeftLowerLeg","LeftFoot","RightUpperLeg","RightLowerLeg","RightFoot"}
+local DBG={}
+local function dbg(k) DBG[k]=(DBG[k] or 0)+1 end
+local TG={t=-1e9,list={},src={}}
+
+local function addr_of(o)
+  if o==nil then return nil end
+  local ok,a=pcall(getfield,o,"Address")
+  if ok and type(a)=="number" then return a end
+end
+
+local function inst_pos(part)
+  if not part then return nil end
+  local ok,p=pcall(function() local q=part.Position; local _=q.X; return q end)
+  if ok and p then return p end
+  ok,p=pcall(function() local q=part.CFrame.Position; local _=q.X; return q end)
+  if ok and p then return p end
+end
+
+local function build_target(char,name,pl,ent,src)
+  local tg={char=char,name=name or "?",pl=pl,ent=ent,src=src,parts={}}
+  for i=1,#PART_NAMES do
+    local n=PART_NAMES[i]
+    local ok,pt=pcall(char.FindFirstChild,char,n)
+    if ok and pt then tg.parts[n]=pt end
+  end
+  local okh,hum=pcall(char.FindFirstChildOfClass,char,"Humanoid")
+  if okh and hum then tg.hum=hum end
+  pcall(function()
+    local hi=char:FindFirstChild("HeldItem")
+    if hi then local k=hi:GetChildren(); if k and k[1] then tg.held=k[1].Name end end
+    if not tg.held then local tl=char:FindFirstChildOfClass("Tool"); if tl then tg.held=tl.Name end end
+  end)
+  return tg
+end
+
+-- the main-menu avatar display model must never get ESP or be aimed at
+local function is_lobby_avatar(inst)
+  local o=inst
+  for _=1,5 do
+    if not o then return false end
+    local ok,n=pcall(getfield,o,"Name")
+    if ok and type(n)=="string" and n:lower():gsub("[^%w]","")~=nil
+       and n:lower():gsub("[^%w]",""):find("lobbyavatar",1,true) then return true end
+    local okp,par=pcall(getfield,o,"Parent")
+    if not okp then return false end
+    o=par
+  end
+  return false
+end
+
+-- True while the local player is standing in the main-menu lobby. The lobby is
+-- a fixed area (Workspace.Lobby, with a LobbyCollision part), so we check whether
+-- our root part is inside it. Fails open: if anything can't be read, returns false.
+local function in_lobby()
+  local ok,res=pcall(function()
+    local lobby=game.Workspace:FindFirstChild("Lobby")
+    if not lobby then return false end
+    local part=lobby:FindFirstDescendant("LobbyCollision")
+    if not part then return false end
+    local ch=game.LocalPlayer.Character
+    local hrp=ch and ch:FindFirstChild("HumanoidRootPart")
+    local pp,hp=inst_pos(part),inst_pos(hrp)
+    if not (pp and hp) then return false end
+    local dx,dy,dz=hp.X-pp.X,hp.Y-pp.Y,hp.Z-pp.Z
+    local oks,sz=pcall(function() local z=part.Size; return {z.X,z.Y,z.Z} end)
+    if oks and sz and sz[1] and sz[3] then
+      return math.abs(dx)<=sz[1]*0.5+20 and math.abs(dz)<=sz[3]*0.5+20 and math.abs(dy)<=200
+    end
+    return math.sqrt(dx*dx+dz*dz)<250 and math.abs(dy)<200
+  end)
+  return ok and res==true
+end
+
+local function gather(v)
+  local t=now()
+  if t-TG.t<0.5 then return TG.list end
+  TG.t=t
+  TG.lobby=in_lobby()
+  local out,seen,src={}, {}, {ent=0,players=0,workspace=0}
+  local lpaddr
+  pcall(function() lpaddr=addr_of(game.LocalPlayer.Character) end)
+  if not lpaddr and v.lp then lpaddr=addr_of(charof(v.lp)) end
+  -- map every way a model can be named (username, display name, user id) to its Player
+  local pmap={}
+  pcall(function()
+    local pls=game.Players:GetChildren()
+    for i=1,#pls do
+      local pl=pls[i]
+      local okn,nm=pcall(getfield,pl,"Name")
+      local okd,dn=pcall(getfield,pl,"DisplayName")
+      local oku,uid=pcall(getfield,pl,"UserId")
+      if okn and type(nm)=="string" then pmap[nm:lower()]=pl end
+      if okd and type(dn)=="string" and dn~="" then pmap[dn:lower()]=pl end
+      if oku and tonumber(uid) then pmap[string.format("%d",math.floor(tonumber(uid)))]=pl end
+    end
+  end)
+  local function push(char,name,pl,ent,s)
+    if not char then return end
+    local a=addr_of(char)
+    if not a or a==lpaddr or seen[a] then return end
+    seen[a]=true
+    if is_lobby_avatar(char) then return end
+    src[s]=src[s]+1
+    if not pl and type(name)=="string" then
+      local m=pmap[name:lower()]
+      if m then pl=m; local ok,real=pcall(getfield,m,"Name"); if ok and type(real)=="string" then name=real end end
+    end
+    local tg=build_target(char,name,pl,ent,s); tg.a=a
+    out[#out+1]=tg
+  end
+  local el=players()
+  if el then
+    for i=1,#el do
+      local p=el[i]
+      local okl,isl=pcall(getfield,p,"IsLocal")
+      if not (okl and isl) then
+        local okn,nm=pcall(getfield,p,"Name")
+        local okp,pl=pcall(getfield,p,"Player")
+        pcall(push,charof(p),okn and nm or "?",okp and pl or nil,p,"ent")
+      end
+    end
+  end
+  pcall(function()
+    local list=game.Players:GetChildren()
+    for i=1,#list do
+      local pl=list[i]
+      local ch=pl.Character
+      if ch then push(ch,pl.Name,pl,nil,"players") end
+    end
+  end)
+  do
+    pcall(function()
+      local hs=game.Workspace:GetDescendantsOfClass("Humanoid")
+      for i=1,#hs do
+        local m=hs[i].Parent
+        if m then
+          local n=m.Name
+          if n~="Rig" and n~="StarterCharacter" then push(m,n,nil,nil,"workspace") end
+        end
+      end
+    end)
+  end
+  TG.list=out; TG.src=src
+  return out
+end
+
+-- ---- geometry -------------------------------------------------------------
+local function geo_ent(p)
+  local d=pdist(p); if not d then return nil,"no_dist" end
+  local okb,b=pcall(p.GetBounds,p)
+  if not okb then DBG.err=tostring(b); return nil,"bounds_err" end
+  if type(b)~="table" or b.valid==false then return nil,"bounds_invalid" end
+  local bx,by,bw,bh=tonumber(b.x),tonumber(b.y),tonumber(b.w),tonumber(b.h)
+  if not (bx and by and bw and bh) or bw<1 or bh<1 then return nil,"bounds_tiny" end
+  return {bx=bx,by=by,bw=bw,bh=bh,d=d,bones=(cfg.esp_skel or cfg.esp_headdot) and bones_of(p) or nil}
+end
+
+-- ---- per-frame records ----------------------------------------------------
+-- One record per target per frame, shared by ESP and aimbot, so both always
+-- agree on where a player is. The box is built from the character's real part
+-- positions (head and feet), so it follows hero scale and body proportions
+-- instead of using fixed offsets or GetBounds (which includes the held item,
+-- accessories and effects and is what made the old box messy).
+local REC={frame=-1,list={}}
+
+local function build_rec(tg,v,need_bones)
+  local p=tg.ent
+  if p then
+    local okl,isl=pcall(getfield,p,"IsLocal")
+    if okl and isl then return nil,"local" end
+    if p.IsAlive==false then return nil,"dead" end
+  end
+  local hp,mhp
+  if p then hp=phealth(p); mhp=pmaxhealth(p)
+  elseif tg.hum then
+    local ok1,h=pcall(getfield,tg.hum,"Health"); local ok2,m=pcall(getfield,tg.hum,"MaxHealth")
+    hp=ok1 and tonumber(h) or nil; mhp=ok2 and tonumber(m) or nil
+  end
+  if not p and hp and hp<=0 then return nil,"dead" end
+  if not mhp or mhp<=0 then mhp=100 end
+
+  local wpos={}
+  for n,pt in pairs(tg.parts) do
+    local pp=inst_pos(pt)
+    if pp then wpos[n]=pp end
+  end
+  if wpos.Torso then
+    wpos.UpperTorso=wpos.UpperTorso or wpos.Torso
+    wpos.LowerTorso=wpos.LowerTorso or wpos.Torso
+  end
+  local rec={tg=tg,p=p,hp=hp,mhp=mhp,wpos=wpos,d=0,bot=(tg.pl==nil and tg.ent==nil)}
+  local hrp=wpos.HumanoidRootPart or wpos.UpperTorso or wpos.LowerTorso
+  if hrp then
+    if v.cx then
+      local dx,dy,dz=hrp.X-v.cx,hrp.Y-v.cy,hrp.Z-v.cz
+      rec.d=math.sqrt(dx*dx+dy*dy+dz*dz)
+    end
+    local hd=wpos.Head
+    local lf,rf=wpos.LeftFoot,wpos.RightFoot
+    local footY
+    if lf and rf then footY=math.min(lf.Y,rf.Y) elseif lf then footY=lf.Y elseif rf then footY=rf.Y end
+    local topY,botY
+    if hd and footY and hd.Y>footY+0.5 then
+      local H=hd.Y-footY
+      topY=hd.Y+0.14*H
+      botY=footY-0.05*H
+    else
+      topY=hd and (hd.Y+0.8) or (hrp.Y+2.7)
+      botY=hrp.Y-3.1
+    end
+    local tx,ty,tok=draw.WorldToScreen(hrp.X,topY,hrp.Z)
+    local fx,fy,fok=draw.WorldToScreen(hrp.X,botY,hrp.Z)
+    if tok and fok then
+      local h=fy-ty
+      if h>=4 then
+        local w=h*0.48
+        local cx=(tx+fx)*0.5
+        rec.box={bx=cx-w*0.5,by=ty,bw=w,bh=h}
+      else rec.why="tiny" end
+    else rec.why="offscreen" end
+    if need_bones then
+      local bones={}
+      for n,pp in pairs(wpos) do
+        local sx,sy,ok=draw.WorldToScreen(pp.X,pp.Y,pp.Z)
+        if ok then bones[n]={sx,sy} end
+      end
+      rec.bones=bones
+    end
+  else
+    rec.why="no_position"
+  end
+  -- last resort: the entity API's own bounds, only when we have no positions
+  if not rec.box and p and not hrp then
+    local g=geo_ent(p)
+    if g then
+      rec.box={bx=g.bx,by=g.by,bw=g.bw,bh=g.bh}; rec.d=g.d; rec.bones=g.bones; rec.why=nil
+    end
+  end
+  return rec
+end
+
+local function build_recs(v)
+  if REC.frame==FRAME then return REC.list end
+  REC.frame=FRAME
+  local list=gather(v)
+  local need=cfg.aim_on or (cfg.esp_on and (cfg.esp_skel or cfg.esp_headdot))
+  local out={}
+  for i=1,#list do
+    local ok,rec,why=pcall(build_rec,list[i],v,need)
+    if not ok then dbg("LUA_ERROR"); DBG.err=tostring(rec)
+    elseif rec then out[#out+1]=rec
+    else dbg(why or "skipped") end
+  end
+  REC.list=out
+  return out
+end
+
+-- ---- drawing --------------------------------------------------------------
+local function esp_rec(rec,v)
+  if rec.d>(cfg.esp_maxdist or 1500) then dbg("range") return end
+  local box=rec.box
+  if not box then dbg(rec.why or "no_box") return end
+  dbg("drawn")
+  local bx,by,bw,bh=box.bx,box.by,box.bw,box.bh
+  local p,tg,d=rec.p,rec.tg,rec.d
+  local c_box=col.c_box or {0.45,0.78,1,1}
+  local c_skel=col.c_enemy or {0.95,0.35,0.4,1}
+  local c_name=col.c_name or {1,1,1,1}
+  local c_dist=col.c_dist or {0.87,0.93,1,1}
+  local c_weap=col.c_weapon or c_name
+  local c_tr=col.c_tracer or c_box
+  local tsz=cfg.esp_textsize or 12
+
+  if cfg.esp_tracer then pcall(draw.Line, v.mx, v.sh, bx+bw*0.5, by+bh, c_tr, 1) end
+  if cfg.esp_box then
+    if (cfg.esp_boxstyle or 1)==1 then pcall(draw.CornerBox, bx, by, bw, bh, c_box)
+    else pcall(draw.Rect, bx, by, bw, bh, c_box, 0, 1) end
+  end
+  if rec.hp and (cfg.esp_hp or cfg.esp_hptext) then
+    if cfg.esp_hp then pcall(draw.HealthBar, bx-5, by, bh, rec.hp, rec.mhp) end
+    if cfg.esp_hptext then
+      pcall(draw.Text, bx+bw+4, by+bh*0.5-6, math.floor(rec.hp/rec.mhp*100).."%", c_dist, math.max(9,tsz-2))
+    end
+  end
+  local bones=rec.bones
+  if cfg.esp_skel and bones then
+    for i=1,#SKEL_PATHS do
+      local path=SKEL_PATHS[i]
+      local run={}; local rn=0
+      for j=1,#path do
+        local e=bones[path[j]]
+        if type(e)=="table" then rn=rn+1; run[rn]={e[1],e[2]}
+        else
+          if rn>=2 then pcall(draw.Poly, run, c_skel, 1.5) end
+          run={}; rn=0
+        end
+      end
+      if rn>=2 then pcall(draw.Poly, run, c_skel, 1.5) end
+    end
+  end
+  if cfg.esp_headdot and bones and bones.Head then
+    pcall(draw.Circle, bones.Head[1], bones.Head[2], math.max(2,bh*0.065), c_skel, 16, 1.5)
+  end
+  local _,th=ts("0",tsz)
+  local numeric=tg.name and tg.name:match("^%d+$")~=nil
+  if cfg.esp_name and tg.name and tg.name~="" and not (numeric and not tg.pl) then
+    local tw=ts(tg.name,tsz)
+    draw.Text(bx+bw*0.5-tw*0.5, by-th-3, tg.name, c_name, tsz)
+  end
+  local ly=by+bh+2
+  if cfg.esp_dist then
+    local s=string.format("%d m",math.floor(d))
+    local tw=ts(s,tsz)
+    draw.Text(bx+bw*0.5-tw*0.5, ly, s, c_dist, tsz)
+    ly=ly+th+1
+  end
+  if cfg.esp_weapon then
+    local tool
+    if p then local okt,tn=pcall(getfield,p,"ToolName"); if okt and tn and tn~="" then tool=tn end end
+    tool=tool or tg.held
+    if tool and tool~="" then
+      local tw=ts(tool,tsz)
+      draw.Text(bx+bw*0.5-tw*0.5, ly, tool, c_weap, tsz)
+    end
+  end
+end
+
+local function run_esp(v)
+  for k in pairs(DBG) do DBG[k]=nil end
+  local recs=build_recs(v)
+  if cfg.esp_on and not TG.lobby then
+    for i=1,#recs do
+      local ok,err=pcall(esp_rec,recs[i],v)
+      if not ok then dbg("LUA_ERROR"); DBG.err=tostring(err) end
+    end
+  end
+end
+
+-- =========================================================================
+-- AIMBOT
+-- =========================================================================
+local AIM_BONE_NAMES={"Head","UpperTorso","HumanoidRootPart","LeftUpperArm","RightUpperArm","LeftUpperLeg","RightUpperLeg"}
+local CLOSEST_BONES={"Head","UpperTorso","LowerTorso","HumanoidRootPart"}
+local AIML={target=nil,x=nil,y=nil,bone=nil}
+local SILENT={on=false}
+pcall(math.randomseed, os.time())
+-- Hit chance: a roll decides whether silent aim is applied. It is re-rolled every
+-- 0.15s and whenever the target changes, so a shot is redirected with roughly
+-- the chosen probability instead of the whole burst being all-or-nothing.
+local HC={ok=true,t=-1e9,a=nil}
+local function hit_roll(rec)
+  local hc=cfg.aim_hc or 100
+  if hc>=100 then HC.ok=true; return true end
+  local t=now()
+  if rec.tg.a~=HC.a or t-HC.t>=0.15 then
+    HC.a=rec.tg.a; HC.t=t
+    HC.ok=(math.random()*100)<hc
+  end
+  return HC.ok
+end
+
+local function aim_point(rec,v)
+  local bones=rec.bones
+  if not bones then return nil end
+  local idx=cfg.aim_bone or 1
+  if idx<=7 then
+    local name=AIM_BONE_NAMES[idx]
+    local e=name and bones[name]
+    if e then return e[1],e[2],name end
+    return nil
+  end
+  local best,bd,bn
+  for i=1,#CLOSEST_BONES do
+    local e=bones[CLOSEST_BONES[i]]
+    if e then
+      local dx,dy=e[1]-v.mx,e[2]-v.my
+      local d=dx*dx+dy*dy
+      if not bd or d<bd then bd=d; best=e; bn=CLOSEST_BONES[i] end
+    end
+  end
+  if best then return best[1],best[2],bn end
+end
+
+local function pick_target(v)
+  local recs=build_recs(v)
+  if TG.lobby then return nil end
+  local fov=cfg.aim_fov or 160
+  local fov2=fov*fov
+  local range=cfg.aim_range or 600
+  local pri=cfg.aim_priority or 1
+  local best,bs,bx,by,bb
+  for i=1,#recs do
+    local rec=recs[i]
+    if rec.d<=range then
+      local x,y,bn=aim_point(rec,v)
+      if x then
+        local dx,dy=x-v.mx,y-v.my
+        local sd2=dx*dx+dy*dy
+        if sd2<=fov2 then
+          local score
+          if pri==2 then score=rec.d
+          elseif pri==3 then score=rec.hp or 100
+          else score=sd2 end
+          if not bs or score<bs then bs=score; best=rec; bx=x; by=y; bb=bn end
+        end
+      end
+    end
+  end
+  if best then return best,bx,by,bb end
+end
+
+local function silent_hook(on)
+  if SILENT.on==on then return end
+  SILENT.on=on
+  if not raycast then return end
+  if on then
+    if raycast.EnableSilentHook then pcall(raycast.EnableSilentHook) end
+  else
+    if raycast.ClearSilentTarget then pcall(raycast.ClearSilentTarget) end
+    if raycast.DisableSilentHook then pcall(raycast.DisableSilentHook) end
+  end
+end
+
+local function silent_clear()
+  if raycast and raycast.ClearSilentTarget then pcall(raycast.ClearSilentTarget) end
+end
+
+local function aim_origin(v)
+  if v.cpos then return v.cpos end
+  local lp=v.lp
+  if lp then
+    local ok,h=pcall(getfield,lp,"HeadPosition")
+    if ok and h then return h end
+  end
+end
+
+local function run_aim(v)
+  -- silent aim is the only aim method
+  if not cfg.aim_on then AIML.target=nil; if SILENT.on then silent_hook(false) end; return end
+  local key=bind.aim_key or 0
+  local held=cfg.aim_always or (key==0) or ekey(key)
+  if not held or ui.capture then
+    AIML.target=nil
+    if SILENT.on then silent_hook(false) end
+    return
+  end
+  local rec,x,y,bone=pick_target(v)
+  if not rec then
+    AIML.target=nil
+    silent_clear()
+    return
+  end
+  AIML.target=rec; AIML.x=x; AIML.y=y; AIML.bone=bone
+  local bname=bone or "Head"
+  local origin=aim_origin(v)
+  local tp=rec.wpos[bname] or rec.wpos.Head or rec.wpos.HumanoidRootPart
+  if origin and tp then
+    if not hit_roll(rec) then
+      silent_clear()
+    else
+      silent_hook(true)
+      local vn=Vector3 and Vector3.New
+      if vn then
+        pcall(raycast.SetSilentTarget,origin,vn(tp.X-origin.X,tp.Y-origin.Y,tp.Z-origin.Z))
+      end
+    end
+  else
+    silent_clear()
+  end
+end
+
+local function draw_aim(v)
+  if not cfg.aim_on then return end
+  local fov=cfg.aim_fov or 160
+  local x,y=v.mx,v.my
+  local c=col.c_fov or {0.45,0.78,1,1}
+  if cfg.aim_fovcircle then
+    local style=cfg.aim_fovstyle or 1
+    if style==1 then
+      pcall(draw.Circle,x,y,fov,c,48,1.2)
+    elseif style==2 then
+      pcall(draw.Rect,x-fov,y-fov,fov*2,fov*2,c,0,1.2)
+    elseif style==3 then
+      pcall(draw.PolyClosed,{{x,y-fov},{x+fov,y},{x,y+fov},{x-fov,y}},c,1.2)
+    else
+      local l=fov*0.28
+      local x0,y0,x1,y1=x-fov,y-fov,x+fov,y+fov
+      pcall(draw.Line,x0,y0,x0+l,y0,c,1.2); pcall(draw.Line,x0,y0,x0,y0+l,c,1.2)
+      pcall(draw.Line,x1,y0,x1-l,y0,c,1.2); pcall(draw.Line,x1,y0,x1,y0+l,c,1.2)
+      pcall(draw.Line,x0,y1,x0+l,y1,c,1.2); pcall(draw.Line,x0,y1,x0,y1-l,c,1.2)
+      pcall(draw.Line,x1,y1,x1-l,y1,c,1.2); pcall(draw.Line,x1,y1,x1,y1-l,c,1.2)
+    end
+  end
+  if cfg.aim_tline and AIML.target and AIML.x then
+    pcall(draw.Line, v.mx, v.my, AIML.x, AIML.y, col.c_tline or c, 1)
+  end
+end
+
+-- =========================================================================
+-- CONFIG (session copy only; no file io)
+-- =========================================================================
+local CFG={last=0}
+local SKEY="EGO_FRAMEBREAK_V1"
+local function genv()
+  local g=getgenv and getgenv()
+  if type(g)~="table" then return nil end
+  return g
+end
+function CFG.save()
+  local g=genv(); if not g then return end
+  local v={}; for k,val in pairs(cfg) do v[k]=val end
+  local b={}; for k,val in pairs(bind) do b[k]=val end
+  local c={}; for k,val in pairs(col) do c[k]={val[1],val[2],val[3],val[4] or 1} end
+  g[SKEY]={v=v,b=b,c=c}
+end
+function CFG.load()
+  local g=genv(); if not g then return end
+  local d=g[SKEY]; if type(d)~="table" then return end
+  if type(d.v)=="table" then
+    for k,val in pairs(d.v) do
+      if cfg[k]~=nil and type(val)==type(cfg[k]) then cfg[k]=val end
+    end
+  end
+  if type(d.b)=="table" then
+    for k,val in pairs(d.b) do
+      local n=tonumber(val)
+      if bind[k]~=nil and n then bind[k]=n end
+    end
+  end
+  if type(d.c)=="table" then
+    for k,val in pairs(d.c) do
+      if col[k]~=nil and type(val)=="table" then
+        local r1,g1,b1=tonumber(val[1]),tonumber(val[2]),tonumber(val[3])
+        if r1 and g1 and b1 then col[k]={r1,g1,b1,tonumber(val[4]) or 1} end
+      end
+    end
+  end
+  -- re-clamp every row into its declared domain
+  for _,tab in ipairs(SCHEMA) do for _,g2 in ipairs(tab.groups) do for _,it in ipairs(g2.items) do
+    if it.t=="slider" and type(cfg[it.id])=="number" then
+      cfg[it.id]=clamp(cfg[it.id],it.min,it.max)
+    elseif it.t=="combo" and type(cfg[it.id])=="number" then
+      cfg[it.id]=clamp(math.floor(cfg[it.id]),1,#it.items)
+    end
+  end end end
+  cfg_dirty=false
+end
+CFG.load()
+
+-- =========================================================================
+-- HUD: watermark, keybind list and feature bar.
+-- They read the menu's own state (cfg toggles + the bind table), so a feature
+-- shows up the moment it is switched on and drops out when it is switched off.
+-- No gameplay state is touched: these are overlays over the menu's settings.
+-- =========================================================================
+local hud_start=nil
+
+local function hud_panel(x,y,w,h,ap,r)
+  r=r or theme.round
+  local e=mix(theme.accent,theme.accent2,0.5)
+  for i=3,1,-1 do
+    draw.RectFilled(x-i*2, y-i*1.5, w+i*4, h+i*3, {0,0,0,0.07*ap}, r+i*2)
+  end
+  draw.RectFilled(x,y,w,h, {theme.base[1],theme.base[2],theme.base[3],0.90*ap}, r)
+  draw.Rect(x,y,w,h, a(theme.line,0.85*ap), r, 1)
+  draw.Rect(x+3,y+3,w-6,h-6, a(theme.line,0.16*ap), r, 1)
+  draw.RectFilled(x+r, y, w-r*2, 2, {e[1],e[2],e[3],0.9*ap}, 0)
+  corners(x,y,w,h, 15, a(e,0.95*ap), 2, a(e,0.4*ap))
+end
+local function hud_head(x,y,w,idx,label)
+  local nw=ts(idx,10)
+  draw.RectFilled(x,y,nw+8,13, a(theme.accent,0.16), 2)
+  draw.Text(x+4,y+2,idx, a(theme.accent,0.95), 10)
+  local caps=string.upper(label); local hw=ts(caps,11)
+  draw.Text(x+nw+15,y+1,caps, a(theme.faint,1), 11)
+  local lx=x+nw+hw+23
+  if lx<x+w then draw.Line(lx,y+9,x+w,y+9, a(theme.line,0.45), 1) end
+end
+-- drag grip: only while the menu is up, so the panels stay clean when closed
+local function hud_grip(x,y,ap)
+  if ui.appear<=0.9 then return end
+  for r=0,1 do for c=0,1 do
+    draw.RectFilled(x+c*4, y+r*4, 1.6,1.6, a(theme.faint,0.9*ap), 0)
+  end end
+end
+-- Scratch state reused every frame instead of rebuilt
+local HUD_S={feats={},w={},keys={},upv=-1,ups="",fpsv=-1,fpss=""}
+local function hud_krow(rows,n,lb,v)
+  n=n+1
+  local r=rows[n]
+  if not r then r={}; rows[n]=r end
+  r[1]=lb; r[2]=vkname(v)
+  return n
+end
+local function hud_key_rows()
+  local rows=HUD_S.keys
+  local n=0
+  local v
+  if cfg.aim_on then
+    v=bind.aim_key or 0; if v~=0 then n=hud_krow(rows,n,"Aimbot",v) end
+    v=bind.aim_toggle or 0; if v~=0 then n=hud_krow(rows,n,"Aim Toggle",v) end
+  end
+  v=bind.esp_toggle or 0
+  if cfg.esp_on and v~=0 then n=hud_krow(rows,n,"ESP Toggle",v) end
+  v=bind.menu_key or 0
+  if v~=0 then n=hud_krow(rows,n,"Menu",v) end
+  for i=#rows,n+1,-1 do rows[i]=nil end
+  return rows
+end
+local function run_hud()
+  local sw,sh=scr()
+  hud_start=hud_start or now()
+  local apm=approach("hud_mark", cfg.hud_mark and 1 or 0, 17)
+  local apk=approach("hud_keys", cfg.hud_keys and 1 or 0, 15)
+  local apb=approach("hud_bar",  cfg.hud_bar  and 1 or 0, 16)
+
+  -- ------------------------------------------------------------- watermark
+  if apm>0.01 then
+    local fps=math.floor((utility.GetFPS and utility.GetFPS()) or 0)
+    if not fps or fps<=0 then fps=math.floor(1/(_dt>0 and _dt or 0.016)) end
+    local up=math.floor(now()-hud_start)
+    local ut
+    if up~=HUD_S.upv then
+      HUD_S.upv=up
+      ut = up<60 and string.format("%ds",up)
+        or (up<3600 and string.format("%dm",math.floor(up/60)))
+        or string.format("%dh%02dm",math.floor(up/3600),math.floor((up%3600)/60))
+      HUD_S.ups=ut
+    else
+      ut=HUD_S.ups
+    end
+    local ft
+    if fps~=HUD_S.fpsv then
+      HUD_S.fpsv=fps
+      ft=string.format("%d FPS",fps)
+      HUD_S.fpss=ft
+    else
+      ft=HUD_S.fpss
+    end
+    local lw=ts("Ego",14); local pw2=ts("Framebreak",11)
+    local fw=ts(ft,11); local uw=ts(ut,11)
+    local ph=30
+    local wpx=14+lw+5+8+6+pw2+10+1+10+fw+10+uw+14
+    local wx=(cfg.hud_mark_x or -1)>=0 and cfg.hud_mark_x or (sw-wpx-16)
+    local wy=(cfg.hud_mark_y or -1)>=0 and cfg.hud_mark_y or 14
+    wx=clamp(wx,0,math.max(0,sw-wpx)); wy=clamp(wy,0,math.max(0,sh-ph))
+    if inside(wx,wy,wpx,ph) and ui.m.click and not ui.drag and not ui.picker then
+      ui.drag={k="hud_mark",ox=ui.m.x-wx,oy=ui.m.y-wy}; ui.m.click=false
+    end
+    hud_panel(wx,wy,wpx,ph,apm,3)
+    hud_grip(wx+wpx-14,wy+2,apm)
+    tmid(wx+14,wy,ph,"Ego", a(theme.text,1), 14)
+    local dcx,dcy=wx+14+lw+5+4, wy+ph*0.5
+    if draw.PolyFilled then pcall(draw.PolyFilled, {{dcx,dcy-4},{dcx+4,dcy},{dcx,dcy+4},{dcx-4,dcy}}, a(theme.accent,1))
+    else draw.RectFilled(dcx-3,dcy-3,6,6, a(theme.accent,1), 1) end
+    local px=dcx+4+6
+    tmid(px,wy,ph,"Framebreak", a(theme.sub,1), 11)
+    local gx=px+pw2+10
+    draw.Line(gx,wy+8,gx,wy+ph-8, a(theme.line,0.6*apm), 1)
+    local tx=gx+11
+    local fc = fps>=100 and theme.ok or (fps>=45 and theme.text or theme.bad)
+    tmid(tx,wy,ph,ft, a(fc,1), 11)
+    tmid(tx+fw+10,wy,ph,ut, a(theme.faint,1), 11)
+  end
+
+  -- ---------------------------------------------------------- keybind list
+  if apk>0.01 then
+    local rows=hud_key_rows()
+    if #rows>0 then
+      local rh=21; local pw=178; local ph=40+#rows*rh
+      local kx=(cfg.hud_keys_x or -1)>=0 and cfg.hud_keys_x or (sw-pw-16)
+      local ky=(cfg.hud_keys_y or -1)>=0 and cfg.hud_keys_y or (sh-ph-18)
+      kx=clamp(kx,0,math.max(0,sw-pw)); ky=clamp(ky,0,math.max(0,sh-ph))
+      if inside(kx,ky,pw,ph) and ui.m.click and not ui.drag and not ui.picker then
+        ui.drag={k="hud_keys",ox=ui.m.x-kx,oy=ui.m.y-ky}; ui.m.click=false
+      end
+      hud_panel(kx,ky,pw,ph,apk,4)
+      hud_head(kx+13,ky+11,pw-26-(ui.appear>0.9 and 13 or 0),"01","Keybinds")
+      hud_grip(kx+pw-16,ky+14,apk)
+      for i,r in ipairs(rows) do
+        local ry=ky+32+(i-1)*rh
+        if i%2==0 then draw.RectFilled(kx+9,ry,pw-18,rh, {1,1,1,0.022*apk}, 0) end
+        tmid(kx+14,ry,rh,r[1], a(theme.sub,1), 11)
+        local kw=ts(r[2],10); local cw=kw+13; local ch=15
+        local cx=kx+pw-13-cw; local cy=ry+(rh-ch)*0.5
+        draw.RectFilled(cx,cy,cw,ch, a(theme.field,1), 2)
+        draw.Rect(cx,cy,cw,ch, a(theme.line,1), 2, 1)
+        tmid(cx,cy,ch,r[2], a(theme.text,1), 10)
+      end
+    end
+  end
+
+  -- ----------------------------------------------------------- feature bar
+  if apb>0.01 then
+    local feats=HUD_S.feats
+    for i=#feats,1,-1 do feats[i]=nil end
+    if cfg.aim_on then feats[#feats+1]="AIM" end
+    if cfg.aim_on then feats[#feats+1]="SILENT" end
+    if cfg.esp_on then feats[#feats+1]="ESP" end
+    if #feats>0 then
+      local gap=7; local pad=16; local ph=34
+      local widths=HUD_S.w; local tot=pad*2+(#feats-1)*gap
+      for i,lb in ipairs(feats) do
+        local cw=math.max(48, ts(lb,10)+20); widths[i]=cw; tot=tot+cw
+      end
+      local bx=(cfg.hud_bar_x or -1)>=0 and cfg.hud_bar_x or (sw*0.5-tot*0.5)
+      local by=(cfg.hud_bar_y or -1)>=0 and cfg.hud_bar_y or (sh-ph-18)
+      bx=clamp(bx,0,math.max(0,sw-tot)); by=clamp(by,0,math.max(0,sh-ph))
+      if inside(bx,by,tot,ph) and ui.m.click and not ui.drag and not ui.picker then
+        ui.drag={k="hud_bar",ox=ui.m.x-bx,oy=ui.m.y-by}; ui.m.click=false
+      end
+      hud_panel(bx,by,tot,ph,apb,4)
+      hud_grip(bx+tot-14,by+2,apb)
+      local e=mix(theme.accent,theme.accent2,0.5)
+      draw.RectFilled(bx+pad-2,by+ph-2,tot-(pad-2)*2,2, {e[1],e[2],e[3],0.9*apb}, 1)
+      local px=bx+pad
+      for i,lb in ipairs(feats) do
+        local cw=widths[i]; local cx=px+cw*0.5
+        draw.CircleFilled(cx,by+11,2.4, a(e,0.95*apb), 12)
+        local tw=ts(lb,10)
+        draw.Text(cx-tw*0.5,by+17,lb, a(theme.text,0.95*apb), 10)
+        if i<#feats then
+          local sx=px+cw+gap*0.5
+          draw.Line(sx,by+9,sx,by+ph-10, a(theme.line,0.5*apb), 1)
+        end
+        px=px+cw+gap
+      end
+    end
+  end
+
+  -- Deferred whole-window grab queued by draw_menu. The panels above claim the
+  -- press first, so this only fires when the click landed on the menu itself.
+  local g=ui.win_grab
+  ui.win_grab=nil
+  if g and ui.m.click and not ui.drag and not ui.picker then
+    ui.drag={k="win",ox=g.ox,oy=g.oy}; ui.m.click=false
+  end
+end
+
+-- =========================================================================
+-- FRAME LOOP
+-- =========================================================================
+local UNLOADED=false
+function OnFrame()
+  if UNLOADED then return end
+  if not (draw and utility and entity and camera and input) then return end
+  _dt=utility.GetDeltaTime and utility.GetDeltaTime() or 0.016
+  if not _dt or _dt<=0 or _dt>0.2 then _dt=0.016 end
+  FRAME=FRAME+1
+  theme.opacity=1
+  if cfg.accent_chroma then
+    local h=now()*0.15
+    theme.accent=hsv(h,0.7,1)
+    theme.accent2=hsv(h+0.11,0.7,1)
+  else
+    theme.accent=col.c_accent or theme.accent
+    theme.accent2=theme.accent2_base
+  end
+
+  update_input()
+  ui.appear=approach("appear", ui.open and 1 or 0, 14)
+
+  local v=view()
+  pcall(run_esp,v)
+  pcall(run_aim,v)
+  pcall(draw_aim,v)
+  if ui.appear>0.01 then pcall(draw_menu) end
+  theme.opacity=1
+  pcall(run_hud)
+
+  if cfg_dirty then
+    local t=now()
+    if t-CFG.last>=1 then CFG.last=t; CFG.save(); cfg_dirty=false end
+  end
+end
+
+-- Unload: drop the silent-aim hook, turn the gameplay features off, persist the
+-- profile and stop drawing. Everything was registered by the host, so the frame
+-- callback is the only thing left to neutralise.
+UNLOAD=function()
+  if UNLOADED then return end
+  UNLOADED=true
+  if SILENT.on then silent_hook(false) end
+  pcall(silent_clear)
+  pcall(CFG.save)  -- persist the user's real settings before switching things off
+  cfg.aim_on=false; cfg.esp_on=false
+  cfg_dirty=false
+  ui.open=false
+  ui.drag=nil; ui.picker=nil; ui.capture=nil
+  pcall(function() notify.Success("Ego | Framebreak","Unloaded",4) end)
+  OnFrame=function() end
+end
+
+pcall(function() notify.Success("Ego | Framebreak","Press "..vkname(bind.menu_key or 0xA1).." to toggle the menu",5) end)
