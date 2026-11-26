@@ -88,24 +88,28 @@ local SCHEMA = {
 {name="Aimbot", groups={
   {name="Aimbot", items={
     {t="toggle",id="aim_on",label="Enable Aimbot",bind="aim_toggle"},
-    {t="bind",id="aim_key",label="Aim Key",default=0x02,show=function() return cfg.aim_on and not cfg.aim_always end},
-    {t="toggle",id="aim_always",label="Always Active",default=false,show=function() return cfg.aim_on end},
+    {t="bind",id="aim_key",label="Aim Key",default=0x02,show=function() return cfg.aim_on and not (cfg.aim_always and (cfg.aim_mode or 1)==1) end},
+    {t="toggle",id="aim_always",label="Always Active",default=false,show=function() return cfg.aim_on and (cfg.aim_mode or 1)==1 end},
+    {t="combo",id="aim_mode",label="Aim Method",items={"Silent","Mouse"},default=1,show=function() return cfg.aim_on end},
     {t="combo",id="aim_bone",label="Aim Bone",items={"Head","Body","Root","Left Arm","Right Arm","Left Leg","Right Leg","Closest to Crosshair"},default=1,show=function() return cfg.aim_on end},
     {t="combo",id="aim_priority",label="Target Priority",items={"Crosshair","Distance","Low HP"},default=1,show=function() return cfg.aim_on end},
   }},
   {name="Settings", items={
     {t="combo",id="aim_fovstyle",label="FOV Style",items={"Circle","Box","Diamond","Corner Box"},default=1,show=function() return cfg.aim_on end},
-    {t="slider",id="aim_fov",label="FOV",min=10,max=60,default=40,suf="px",show=function() return cfg.aim_on end},
-    {t="slider",id="aim_range",label="Aimbot Range",min=20,max=1500,default=600,suf="m",show=function() return cfg.aim_on end},
-    {t="slider",id="aim_hc",label="Hit Chance",min=1,max=100,default=100,suf="%",show=function() return cfg.aim_on end},
+    {t="slider",id="aim_fov",label="FOV",min=10,max=60,default=40,suf="px",show=function() return cfg.aim_on and (cfg.aim_mode or 1)==1 end},
+    {t="slider",id="aim_fovm",label="FOV",min=10,max=300,default=100,suf="px",show=function() return cfg.aim_on and cfg.aim_mode==2 end},
+    {t="slider",id="aim_range",label="Aimbot Range",min=20,max=20000,default=20000,suf="m",show=function() return cfg.aim_on end},
+    {t="slider",id="aim_hc",label="Hit Chance",min=1,max=100,default=100,suf="%",show=function() return cfg.aim_on and (cfg.aim_mode or 1)==1 end},
+    {t="slider",id="aim_soft",label="Smoothing",min=1,max=100,default=10,show=function() return cfg.aim_on and cfg.aim_mode==2 end},
+    {t="slider",id="aim_dz",label="Deadzone",min=1,max=50,default=2,suf="px",show=function() return cfg.aim_on and cfg.aim_mode==2 end},
+    {t="toggle",id="aim_ease",label="Ease In",default=true,show=function() return cfg.aim_on and cfg.aim_mode==2 end},
     {t="toggle",id="aim_tline",label="Target Line",default=true,color="c_tline",show=function() return cfg.aim_on end},
     {t="toggle",id="aim_fovcircle",label="Show FOV",default=true,color="c_fov",show=function() return cfg.aim_on end},
   }},
 }},
 {name="ESP", groups={
   {name="Players", items={
-    {t="toggle",id="esp_on",label="Enable ESP",default=true},
-    {t="bind",id="esp_toggle",label="Toggle Key",default=0x56,show=function() return cfg.esp_on end},
+    {t="toggle",id="esp_on",label="Enable ESP",default=true,bind="esp_toggle"},
     {t="toggle",id="esp_box",label="Box",default=true,color="c_box",show=function() return cfg.esp_on end},
     {t="combo",id="esp_boxstyle",label="Box Style",items={"Corner","Full"},default=1,show=function() return cfg.esp_on end},
     {t="toggle",id="esp_skel",label="Skeleton",default=true,color="c_enemy",show=function() return cfg.esp_on end},
@@ -118,7 +122,7 @@ local SCHEMA = {
     {t="toggle",id="esp_hptext",label="Health Text",default=false,show=function() return cfg.esp_on and cfg.esp_hp end},
     {t="toggle",id="esp_weapon",label="Held Item",default=true,color="c_weapon",show=function() return cfg.esp_on end},
     {t="toggle",id="esp_tracer",label="Tracers",default=false,color="c_tracer",show=function() return cfg.esp_on end},
-    {t="slider",id="esp_maxdist",label="Player Range",min=0,max=1500,default=1500,suf="m",show=function() return cfg.esp_on end},
+    {t="slider",id="esp_maxdist",label="Player Range",min=0,max=20000,default=20000,suf="m",show=function() return cfg.esp_on end},
     {t="slider",id="esp_textsize",label="Text Size",min=9,max=18,default=12,show=function() return cfg.esp_on end},
   }},
 }},
@@ -148,6 +152,7 @@ local DEF_COL={
 }
 
 bind.aim_toggle=0x46
+bind.esp_toggle=0x56
 for _,tab in ipairs(SCHEMA) do for _,g in ipairs(tab.groups) do for _,it in ipairs(g.items) do
   if it.t=="toggle" then cfg[it.id]=it.default or false
   elseif it.t=="slider" then cfg[it.id]=it.default or it.min
@@ -326,7 +331,7 @@ local function w_slider(it,x,y,w)
   local disp=it._disp
   if it._dv~=v then
     it._dv=v
-    disp=string.format("%.0f",v)..(it.suf and (" "..it.suf) or "")
+    disp=string.format("%."..(it.dec or 0).."f",v)..(it.suf and (" "..it.suf) or "")
     it._disp=disp
   end
   local dw=ts(disp,12)
@@ -345,7 +350,7 @@ local function w_slider(it,x,y,w)
   else draw.RectFilled(kx,ky,ks,ks, a(theme.text,1), 2) end
   if inside(x,y,w,top) and ui.m.click and not ui.drag and interactable() then ui.drag={k="slider",id=it.id,x=x,w=w,min=it.min,max=it.max} end
   if ui.drag and ui.drag.k=="slider" and ui.drag.id==it.id then
-    if ui.m.down then local nv=math.floor(it.min+clamp((ui.m.x-x)/w,0,1)*(it.max-it.min)+0.5); if nv~=cfg[it.id] then cfg[it.id]=nv; cfg_dirty=true end else ui.drag=nil end
+    if ui.m.down then local raw=it.min+clamp((ui.m.x-x)/w,0,1)*(it.max-it.min); local sc=10^(it.dec or 0); local nv=math.floor(raw*sc+0.5)/sc; if nv~=cfg[it.id] then cfg[it.id]=nv; cfg_dirty=true end else ui.drag=nil end
   end
   return top
 end
@@ -769,48 +774,11 @@ local function players()
   return c.list
 end
 
-local BM={frame=-1}
-local function bones_of(p)
-  local c=BM
-  if c.frame~=FRAME then
-    for k in pairs(c) do c[k]=nil end
-    c.frame=FRAME
-  end
-  local d=c[p]
-  if d==nil then
-    local ok,r=pcall(p.GetBonesScreen,p)
-    d=(ok and type(r)=="table") and r or false
-    c[p]=d
-  end
-  if d==false then return nil end
-  return d
-end
-
-local function bone_xy(p,name)
-  local b=bones_of(p)
-  if not b then return nil end
-  local e=b[name]
-  if type(e)~="table" then return nil end
-  local x,y=e[1],e[2]
-  if x==x and y==y then return x,y end
-end
-
 local function charof(p)
   local ok,c=pcall(getfield,p,"Character")
   if ok and c then return c end
   local ok2,g=pcall(getfield,p,"GetCharacter")
   if ok2 and type(g)=="function" then local ok3,r=pcall(g,p); if ok3 then return r end end
-end
-
-local function findchild(o,n)
-  if not o then return nil end
-  local ok,r=pcall(o.FindFirstChild,o,n)
-  if ok then return r end
-end
-
-local function pdist(p)
-  local ok,r=pcall(p.DistanceTo,p)
-  if ok and type(r)=="number" then return r end
 end
 
 local function phealth(p)
@@ -826,12 +794,16 @@ end
 -- =========================================================================
 -- ESP
 -- =========================================================================
+-- Joint chains. Neck, LShoulder, RShoulder, LHip and RHip are synthetic joints built
+-- in build_rec from real part positions; the rest are R15 part centres.
 local SKEL_PATHS={
-  {"Head","UpperTorso","LowerTorso","HumanoidRootPart"},
-  {"UpperTorso","LeftUpperArm","LeftLowerArm","LeftHand"},
-  {"UpperTorso","RightUpperArm","RightLowerArm","RightHand"},
-  {"LowerTorso","LeftUpperLeg","LeftLowerLeg","LeftFoot"},
-  {"LowerTorso","RightUpperLeg","RightLowerLeg","RightFoot"},
+  {"Head","Neck","UpperTorso","LowerTorso"},
+  {"LShoulder","Neck","RShoulder"},
+  {"LShoulder","LeftUpperArm","LeftLowerArm","LeftHand"},
+  {"RShoulder","RightUpperArm","RightLowerArm","RightHand"},
+  {"LHip","LowerTorso","RHip"},
+  {"LHip","LeftUpperLeg","LeftLowerLeg","LeftFoot"},
+  {"RHip","RightUpperLeg","RightLowerLeg","RightFoot"},
 }
 
 -- ---- target discovery -----------------------------------------------------
@@ -844,9 +816,9 @@ local SKEL_PATHS={
 local PART_NAMES={"Torso","Head","UpperTorso","LowerTorso","HumanoidRootPart",
   "LeftUpperArm","LeftLowerArm","LeftHand","RightUpperArm","RightLowerArm","RightHand",
   "LeftUpperLeg","LeftLowerLeg","LeftFoot","RightUpperLeg","RightLowerLeg","RightFoot"}
-local DBG={}
-local function dbg(k) DBG[k]=(DBG[k] or 0)+1 end
-local TG={t=-1e9,list={},src={}}
+local TG={t=-1e9,list={}}
+local WS={list={}}            -- Workspace humanoid models found by the sliced scan
+local TGC={}                  -- per-character target cache keyed by address
 
 local function addr_of(o)
   if o==nil then return nil end
@@ -856,10 +828,13 @@ end
 
 local function inst_pos(part)
   if not part then return nil end
-  local ok,p=pcall(function() local q=part.Position; local _=q.X; return q end)
+  local ok,p=pcall(getfield,part,"Position")
   if ok and p then return p end
-  ok,p=pcall(function() local q=part.CFrame.Position; local _=q.X; return q end)
-  if ok and p then return p end
+  local okc,cf=pcall(getfield,part,"CFrame")
+  if okc and cf then
+    local okp,pp=pcall(getfield,cf,"Position")
+    if okp and pp then return pp end
+  end
 end
 
 local function build_target(char,name,pl,ent,src)
@@ -897,11 +872,23 @@ end
 -- True while the local player is standing in the main-menu lobby. The lobby is
 -- a fixed area (Workspace.Lobby, with a LobbyCollision part), so we check whether
 -- our root part is inside it. Fails open: if anything can't be read, returns false.
+local LOBBY={part=nil,t=-1e9}
 local function in_lobby()
   local ok,res=pcall(function()
-    local lobby=game.Workspace:FindFirstChild("Lobby")
-    if not lobby then return false end
-    local part=lobby:FindFirstDescendant("LobbyCollision")
+    -- the descendant search is slow, so the part is cached and re-found at most every 5s
+    local part=LOBBY.part
+    local okv,valid=false,false
+    if part then okv,valid=pcall(utility.IsValid,part) end
+    if not (okv and valid) then
+      part=nil
+      local t=now()
+      if t-LOBBY.t>=15 then
+        LOBBY.t=t
+        local lobby=game.Workspace:FindFirstChild("Lobby")
+        if lobby then part=lobby:FindFirstDescendant("LobbyCollision") end
+      end
+      LOBBY.part=part
+    end
     if not part then return false end
     local ch=game.LocalPlayer.Character
     local hrp=ch and ch:FindFirstChild("HumanoidRootPart")
@@ -917,12 +904,61 @@ local function in_lobby()
   return ok and res==true
 end
 
+-- Bot/NPC discovery. A single GetDescendants over the whole Workspace is one long
+-- call and shows up as a freeze every few seconds, so the tree is walked
+-- breadth-first in ~1ms slices per frame instead. Only Models and Folders are
+-- descended into (parts never hold characters). A full pass then restarts after
+-- a short pause, and the finished list replaces the old one in one step.
+local SCAN={q={},i=1,found={},t=-1e9,active=false}
+local SCAN_CLASSES={Model=true,Folder=true}
+local HEAVY={}   -- containers with lots of children (map geometry): never descended into again
+local function ws_step()
+  local t0=utility.GetTime()
+  if not SCAN.active then
+    if t0-SCAN.t<1.5 then return end
+    SCAN.q={game.Workspace}; SCAN.i=1; SCAN.found={}; SCAN.active=true
+  end
+  local deadline=t0+0.001
+  local q=SCAN.q
+  while SCAN.i<=#q do
+    local idx=SCAN.i
+    local node=q[idx]; SCAN.i=idx+1
+    local na=idx>1 and addr_of(node) or nil
+    if not (na and HEAVY[na]) then
+      local ok,kids=pcall(node.GetChildren,node)
+      if ok and kids then
+        local nk=#kids
+        local heavy=(idx>1 and nk>250)
+        if heavy and na then HEAVY[na]=true end
+        local has_hum=false
+        for k=1,nk do
+          local kid=kids[k]
+          local okc,cn=pcall(getfield,kid,"ClassName")
+          if okc then
+            if cn=="Humanoid" then has_hum=true
+            elseif SCAN_CLASSES[cn] and not heavy then q[#q+1]=kid end
+          end
+        end
+        if has_hum then
+          local okn,nm=pcall(getfield,node,"Name")
+          if not (okn and (nm=="Rig" or nm=="StarterCharacter")) then
+            SCAN.found[#SCAN.found+1]={inst=node,a=na or addr_of(node),name=okn and nm or "?"}
+          end
+        end
+      end
+    end
+    if utility.GetTime()>=deadline then return end
+  end
+  WS.list=SCAN.found; SCAN.active=false; SCAN.t=utility.GetTime()
+end
+
 local function gather(v)
   local t=now()
   if t-TG.t<0.5 then return TG.list end
   TG.t=t
   TG.lobby=in_lobby()
-  local out,seen,src={}, {}, {ent=0,players=0,workspace=0}
+  local out,seen={}, {}
+  local ncache={}
   local lpaddr
   pcall(function() lpaddr=addr_of(game.LocalPlayer.Character) end)
   if not lpaddr and v.lp then lpaddr=addr_of(charof(v.lp)) end
@@ -940,18 +976,27 @@ local function gather(v)
       if oku and tonumber(uid) then pmap[string.format("%d",math.floor(tonumber(uid)))]=pl end
     end
   end)
-  local function push(char,name,pl,ent,s)
+  local function push(char,name,pl,ent,s,a)
     if not char then return end
-    local a=addr_of(char)
+    a=a or addr_of(char)
     if not a or a==lpaddr or seen[a] then return end
     seen[a]=true
-    if is_lobby_avatar(char) then return end
-    src[s]=src[s]+1
+    local c=TGC[a]
+    if c and c.lav then ncache[a]=c; return end
+    if not c and is_lobby_avatar(char) then ncache[a]={lav=true,t=t}; return end
     if not pl and type(name)=="string" then
       local m=pmap[name:lower()]
       if m then pl=m; local ok,real=pcall(getfield,m,"Name"); if ok and type(real)=="string" then name=real end end
     end
-    local tg=build_target(char,name,pl,ent,s); tg.a=a
+    local c=TGC[a]
+    local tg
+    if c and c.tg and t-c.t<2 then
+      tg=c.tg; tg.name=name or tg.name; tg.pl=pl; tg.ent=ent; tg.src=s
+    else
+      tg=build_target(char,name,pl,ent,s); tg.a=a
+      c={tg=tg,t=t-math.random()*1.5}   -- staggered so rebuilds never bunch up
+    end
+    ncache[a]=c
     out[#out+1]=tg
   end
   local el=players()
@@ -974,31 +1019,13 @@ local function gather(v)
       if ch then push(ch,pl.Name,pl,nil,"players") end
     end
   end)
-  do
-    pcall(function()
-      local hs=game.Workspace:GetDescendantsOfClass("Humanoid")
-      for i=1,#hs do
-        local m=hs[i].Parent
-        if m then
-          local n=m.Name
-          if n~="Rig" and n~="StarterCharacter" then push(m,n,nil,nil,"workspace") end
-        end
-      end
-    end)
+  for i=1,#WS.list do
+    local m=WS.list[i]
+    local okv,valid=pcall(utility.IsValid,m.inst)
+    if okv and valid then push(m.inst,m.name,nil,nil,"workspace",m.a) end
   end
-  TG.list=out; TG.src=src
+  TG.list=out; TGC=ncache
   return out
-end
-
--- ---- geometry -------------------------------------------------------------
-local function geo_ent(p)
-  local d=pdist(p); if not d then return nil,"no_dist" end
-  local okb,b=pcall(p.GetBounds,p)
-  if not okb then DBG.err=tostring(b); return nil,"bounds_err" end
-  if type(b)~="table" or b.valid==false then return nil,"bounds_invalid" end
-  local bx,by,bw,bh=tonumber(b.x),tonumber(b.y),tonumber(b.w),tonumber(b.h)
-  if not (bx and by and bw and bh) or bw<1 or bh<1 then return nil,"bounds_tiny" end
-  return {bx=bx,by=by,bw=bw,bh=bh,d=d,bones=(cfg.esp_skel or cfg.esp_headdot) and bones_of(p) or nil}
 end
 
 -- ---- per-frame records ----------------------------------------------------
@@ -1009,38 +1036,73 @@ end
 -- accessories and effects and is what made the old box messy).
 local REC={frame=-1,list={}}
 
-local function build_rec(tg,v,need_bones)
+local BOX_PARTS={HumanoidRootPart=true,UpperTorso=true,LowerTorso=true,Torso=true,Head=true,LeftFoot=true,RightFoot=true}
+local function put_joint(bones,pool,name,x,y,z)
+  local sx,sy,ok=draw.WorldToScreen(x,y,z)
+  if not ok then return end
+  local e=pool[name]
+  if not e then e={}; pool[name]=e end
+  e[1]=sx; e[2]=sy
+  bones[name]=e
+end
+
+local function build_rec(tg,v)
   local p=tg.ent
   if p then
     local okl,isl=pcall(getfield,p,"IsLocal")
-    if okl and isl then return nil,"local" end
-    if p.IsAlive==false then return nil,"dead" end
+    if okl and isl then return nil end
+    if p.IsAlive==false then return nil end
   end
+  local parts=tg.parts
+  -- 1. root part only: distance decides whether anything else is read at all
+  local hname=(parts.HumanoidRootPart and "HumanoidRootPart") or (parts.UpperTorso and "UpperTorso")
+    or (parts.LowerTorso and "LowerTorso") or (parts.Torso and "Torso")
+  if not hname then return nil end
+  local hrp=inst_pos(parts[hname])
+  if not hrp then return nil end
+  local d=0
+  if v.cx then
+    local dx,dy,dz=hrp.X-v.cx,hrp.Y-v.cy,hrp.Z-v.cz
+    d=math.sqrt(dx*dx+dy*dy+dz*dz)
+  end
+  local esp_r=cfg.esp_on and (cfg.esp_maxdist or 20000) or -1
+  local aim_r=cfg.aim_on and (cfg.aim_range or 20000) or -1
+  local want_esp=d<=esp_r
+  local want_aim=d<=aim_r
+  if not (want_esp or want_aim) then return nil end
+
+  -- 2. health
   local hp,mhp
   if p then hp=phealth(p); mhp=pmaxhealth(p)
   elseif tg.hum then
     local ok1,h=pcall(getfield,tg.hum,"Health"); local ok2,m=pcall(getfield,tg.hum,"MaxHealth")
     hp=ok1 and tonumber(h) or nil; mhp=ok2 and tonumber(m) or nil
   end
-  if not p and hp and hp<=0 then return nil,"dead" end
+  if not p and hp and hp<=0 then return nil end
   if not mhp or mhp<=0 then mhp=100 end
 
-  local wpos={}
-  for n,pt in pairs(tg.parts) do
-    local pp=inst_pos(pt)
-    if pp then wpos[n]=pp end
+  -- 3. box parts. All tables below are owned by the target and reused every frame,
+  -- so a frame allocates almost nothing and the garbage collector has nothing to hitch on.
+  local wpos=tg.wpos
+  if not wpos then wpos={}; tg.wpos=wpos end
+  for k in pairs(wpos) do wpos[k]=nil end
+  wpos[hname]=hrp
+  for n in pairs(BOX_PARTS) do
+    if n~=hname then
+      local pt=parts[n]
+      if pt then local pp=inst_pos(pt); if pp then wpos[n]=pp end end
+    end
   end
   if wpos.Torso then
     wpos.UpperTorso=wpos.UpperTorso or wpos.Torso
     wpos.LowerTorso=wpos.LowerTorso or wpos.Torso
   end
-  local rec={tg=tg,p=p,hp=hp,mhp=mhp,wpos=wpos,d=0,bot=(tg.pl==nil and tg.ent==nil)}
-  local hrp=wpos.HumanoidRootPart or wpos.UpperTorso or wpos.LowerTorso
-  if hrp then
-    if v.cx then
-      local dx,dy,dz=hrp.X-v.cx,hrp.Y-v.cy,hrp.Z-v.cz
-      rec.d=math.sqrt(dx*dx+dy*dy+dz*dz)
-    end
+  local rec=tg.rec
+  if not rec then rec={}; tg.rec=rec end
+  rec.tg=tg; rec.p=p; rec.hp=hp; rec.mhp=mhp; rec.wpos=wpos; rec.d=d
+  rec.box=nil; rec.bones=nil
+
+  if want_esp then
     local hd=wpos.Head
     local lf,rf=wpos.LeftFoot,wpos.RightFoot
     local footY
@@ -1060,26 +1122,50 @@ local function build_rec(tg,v,need_bones)
       local h=fy-ty
       if h>=4 then
         local w=h*0.48
-        local cx=(tx+fx)*0.5
-        rec.box={bx=cx-w*0.5,by=ty,bw=w,bh=h}
-      else rec.why="tiny" end
-    else rec.why="offscreen" end
-    if need_bones then
-      local bones={}
-      for n,pp in pairs(wpos) do
-        local sx,sy,ok=draw.WorldToScreen(pp.X,pp.Y,pp.Z)
-        if ok then bones[n]={sx,sy} end
+        local bt=tg.boxt
+        if not bt then bt={}; tg.boxt=bt end
+        bt.bx=(tx+fx)*0.5-w*0.5; bt.by=ty; bt.bw=w; bt.bh=h
+        rec.box=bt
       end
-      rec.bones=bones
     end
-  else
-    rec.why="no_position"
   end
-  -- last resort: the entity API's own bounds, only when we have no positions
-  if not rec.box and p and not hrp then
-    local g=geo_ent(p)
-    if g then
-      rec.box={bx=g.bx,by=g.by,bw=g.bw,bh=g.bh}; rec.d=g.d; rec.bones=g.bones; rec.why=nil
+
+  -- 4. remaining body parts, only when the skeleton, head dot or aimbot needs them
+  if want_aim or (want_esp and (cfg.esp_skel or cfg.esp_headdot)) then
+    for n,pt in pairs(parts) do
+      if not BOX_PARTS[n] then
+        local pp=inst_pos(pt)
+        if pp then wpos[n]=pp end
+      end
+    end
+    local bones=tg.bones
+    if not bones then bones={}; tg.bones=bones; tg.pool={} end
+    local pool=tg.pool
+    for k in pairs(bones) do bones[k]=nil end
+    for n,pp in pairs(wpos) do
+      local sx,sy,ok=draw.WorldToScreen(pp.X,pp.Y,pp.Z)
+      if ok then
+        local e=pool[n]
+        if not e then e={}; pool[n]=e end
+        e[1]=sx; e[2]=sy
+        bones[n]=e
+      end
+    end
+    rec.bones=bones
+    if want_esp and cfg.esp_skel then
+      -- Part centres sit mid-limb, so a line through them starts at the chest and
+      -- elbows instead of the joints. Build neck, shoulders and hips from the body
+      -- height (head to feet) so the skeleton follows scale and looks anatomical.
+      local hd,lf,rf=wpos.Head,wpos.LeftFoot,wpos.RightFoot
+      local fy=(lf and rf and math.min(lf.Y,rf.Y)) or (lf and lf.Y) or (rf and rf.Y)
+      local H=4.4
+      if hd and fy and hd.Y>fy+0.5 then H=hd.Y-fy end
+      local o=0.13*H
+      if hd then put_joint(bones,pool,"Neck",hd.X,hd.Y-o,hd.Z) end
+      local q=wpos.LeftUpperArm;  if q then put_joint(bones,pool,"LShoulder",q.X,q.Y+o,q.Z) end
+      q=wpos.RightUpperArm;       if q then put_joint(bones,pool,"RShoulder",q.X,q.Y+o,q.Z) end
+      q=wpos.LeftUpperLeg;        if q then put_joint(bones,pool,"LHip",q.X,q.Y+o,q.Z) end
+      q=wpos.RightUpperLeg;       if q then put_joint(bones,pool,"RHip",q.X,q.Y+o,q.Z) end
     end
   end
   return rec
@@ -1088,27 +1174,31 @@ end
 local function build_recs(v)
   if REC.frame==FRAME then return REC.list end
   REC.frame=FRAME
+  ws_step()
   local list=gather(v)
-  local need=cfg.aim_on or (cfg.esp_on and (cfg.esp_skel or cfg.esp_headdot))
   local out={}
   for i=1,#list do
-    local ok,rec,why=pcall(build_rec,list[i],v,need)
-    if not ok then dbg("LUA_ERROR"); DBG.err=tostring(rec)
-    elseif rec then out[#out+1]=rec
-    else dbg(why or "skipped") end
+    local ok,rec=pcall(build_rec,list[i],v)
+    if ok and rec then out[#out+1]=rec end
   end
   REC.list=out
   return out
 end
 
 -- ---- drawing --------------------------------------------------------------
+local TH={}
+local function text_h(sz)
+  local h=TH[sz]
+  if not h then local _,hh=ts("0",sz); h=hh; TH[sz]=h end
+  return h
+end
+
 local function esp_rec(rec,v)
-  if rec.d>(cfg.esp_maxdist or 1500) then dbg("range") return end
   local box=rec.box
-  if not box then dbg(rec.why or "no_box") return end
-  dbg("drawn")
+  if not box or rec.d>(cfg.esp_maxdist or 20000) then return end
   local bx,by,bw,bh=box.bx,box.by,box.bw,box.bh
   local p,tg,d=rec.p,rec.tg,rec.d
+  local cx=bx+bw*0.5
   local c_box=col.c_box or {0.45,0.78,1,1}
   local c_skel=col.c_enemy or {0.95,0.35,0.4,1}
   local c_name=col.c_name or {1,1,1,1}
@@ -1116,68 +1206,79 @@ local function esp_rec(rec,v)
   local c_weap=col.c_weapon or c_name
   local c_tr=col.c_tracer or c_box
   local tsz=cfg.esp_textsize or 12
+  local th=text_h(tsz)
+  local PAD=3
 
-  if cfg.esp_tracer then pcall(draw.Line, v.mx, v.sh, bx+bw*0.5, by+bh, c_tr, 1) end
+  -- Every element below is anchored to the box rectangle (which is always computed),
+  -- never to the box drawing itself, so they sit in the same place with Box on or off.
+  if cfg.esp_tracer then pcall(draw.Line, v.mx, v.sh, cx, by+bh, c_tr, 1) end
   if cfg.esp_box then
     if (cfg.esp_boxstyle or 1)==1 then pcall(draw.CornerBox, bx, by, bw, bh, c_box)
     else pcall(draw.Rect, bx, by, bw, bh, c_box, 0, 1) end
   end
-  if rec.hp and (cfg.esp_hp or cfg.esp_hptext) then
-    if cfg.esp_hp then pcall(draw.HealthBar, bx-5, by, bh, rec.hp, rec.mhp) end
+
+  -- left of the box: health bar, with the percentage beside the bar at fill height
+  if rec.hp then
+    if cfg.esp_hp then pcall(draw.HealthBar, bx-6, by, bh, rec.hp, rec.mhp) end
     if cfg.esp_hptext then
-      pcall(draw.Text, bx+bw+4, by+bh*0.5-6, math.floor(rec.hp/rec.mhp*100).."%", c_dist, math.max(9,tsz-2))
+      local frac=clamp(rec.hp/rec.mhp,0,1)
+      local s=math.floor(frac*100).."%"
+      local hsz=math.max(9,tsz-2)
+      local hh=text_h(hsz)
+      local tw=ts(s,hsz)
+      local tx=bx-(cfg.esp_hp and 9 or 4)-tw
+      local ty=clamp(by+bh*(1-frac)-hh*0.5, by, by+bh-hh)
+      draw.Text(tx, ty, s, c_dist, hsz)
     end
   end
+
   local bones=rec.bones
   if cfg.esp_skel and bones then
     for i=1,#SKEL_PATHS do
       local path=SKEL_PATHS[i]
-      local run={}; local rn=0
+      local prev
       for j=1,#path do
         local e=bones[path[j]]
-        if type(e)=="table" then rn=rn+1; run[rn]={e[1],e[2]}
-        else
-          if rn>=2 then pcall(draw.Poly, run, c_skel, 1.5) end
-          run={}; rn=0
-        end
+        if e and prev then pcall(draw.Line, prev[1], prev[2], e[1], e[2], c_skel, 1.5) end
+        prev=e
       end
-      if rn>=2 then pcall(draw.Poly, run, c_skel, 1.5) end
     end
   end
   if cfg.esp_headdot and bones and bones.Head then
     pcall(draw.Circle, bones.Head[1], bones.Head[2], math.max(2,bh*0.065), c_skel, 16, 1.5)
   end
-  local _,th=ts("0",tsz)
-  local numeric=tg.name and tg.name:match("^%d+$")~=nil
-  if cfg.esp_name and tg.name and tg.name~="" and not (numeric and not tg.pl) then
-    local tw=ts(tg.name,tsz)
-    draw.Text(bx+bw*0.5-tw*0.5, by-th-3, tg.name, c_name, tsz)
+
+  -- above the box: name
+  local nm=tg.name
+  if cfg.esp_name and nm and nm~="" and (tg.pl or not nm:match("^%d+$")) then
+    local key=tsz..nm
+    if tg.nwk~=key then tg.nwk=key; tg.nw=ts(nm,tsz) end
+    draw.Text(cx-tg.nw*0.5, by-th-PAD, nm, c_name, tsz)
   end
-  local ly=by+bh+2
+
+  -- below the box: distance, then held item
+  local ly=by+bh+PAD
   if cfg.esp_dist then
-    local s=string.format("%d m",math.floor(d))
-    local tw=ts(s,tsz)
-    draw.Text(bx+bw*0.5-tw*0.5, ly, s, c_dist, tsz)
+    local dv=math.floor(d)
+    if tg.dv~=dv or tg.dk~=tsz then tg.dv=dv; tg.dk=tsz; tg.ds=dv.." m"; tg.dw=ts(tg.ds,tsz) end
+    draw.Text(cx-tg.dw*0.5, ly, tg.ds, c_dist, tsz)
     ly=ly+th+1
   end
   if cfg.esp_weapon then
-    local tool
+    local tool=tg.held
     if p then local okt,tn=pcall(getfield,p,"ToolName"); if okt and tn and tn~="" then tool=tn end end
-    tool=tool or tg.held
     if tool and tool~="" then
-      local tw=ts(tool,tsz)
-      draw.Text(bx+bw*0.5-tw*0.5, ly, tool, c_weap, tsz)
+      if tg.tn~=tool or tg.tk~=tsz then tg.tn=tool; tg.tk=tsz; tg.tw=ts(tool,tsz) end
+      draw.Text(cx-tg.tw*0.5, ly, tool, c_weap, tsz)
     end
   end
 end
 
 local function run_esp(v)
-  for k in pairs(DBG) do DBG[k]=nil end
   local recs=build_recs(v)
   if cfg.esp_on and not TG.lobby then
     for i=1,#recs do
-      local ok,err=pcall(esp_rec,recs[i],v)
-      if not ok then dbg("LUA_ERROR"); DBG.err=tostring(err) end
+      pcall(esp_rec,recs[i],v)
     end
   end
 end
@@ -1189,6 +1290,10 @@ local AIM_BONE_NAMES={"Head","UpperTorso","HumanoidRootPart","LeftUpperArm","Rig
 local CLOSEST_BONES={"Head","UpperTorso","LowerTorso","HumanoidRootPart"}
 local AIML={target=nil,x=nil,y=nil,bone=nil}
 local SILENT={on=false}
+local function eff_fov()
+  if cfg.aim_mode==2 then return cfg.aim_fovm or 100 end
+  return cfg.aim_fov or 40
+end
 pcall(math.randomseed, os.time())
 -- Hit chance: a roll decides whether silent aim is applied. It is re-rolled every
 -- 0.15s and whenever the target changes, so a shot is redirected with roughly
@@ -1230,9 +1335,9 @@ end
 local function pick_target(v)
   local recs=build_recs(v)
   if TG.lobby then return nil end
-  local fov=cfg.aim_fov or 160
+  local fov=eff_fov()
   local fov2=fov*fov
-  local range=cfg.aim_range or 600
+  local range=cfg.aim_range or 20000
   local pri=cfg.aim_priority or 1
   local best,bs,bx,by,bb
   for i=1,#recs do
@@ -1284,20 +1389,50 @@ local function run_aim(v)
   -- silent aim is the only aim method
   if not cfg.aim_on then AIML.target=nil; if SILENT.on then silent_hook(false) end; return end
   local key=bind.aim_key or 0
-  local held=cfg.aim_always or (key==0) or ekey(key)
+  local held=(cfg.aim_always and (cfg.aim_mode or 1)==1) or (key==0) or ekey(key)
   if not held or ui.capture then
-    AIML.target=nil
+    AIML.target=nil; AIML.ease_a=nil; AIML.ax=0; AIML.ay=0
     if SILENT.on then silent_hook(false) end
     return
   end
   local rec,x,y,bone=pick_target(v)
   if not rec then
-    AIML.target=nil
+    AIML.target=nil; AIML.ease_a=nil; AIML.ax=0; AIML.ay=0
     silent_clear()
     return
   end
   AIML.target=rec; AIML.x=x; AIML.y=y; AIML.bone=bone
   local bname=bone or "Head"
+  if cfg.aim_mode==2 then
+    -- mouse aim: nudge the cursor toward the target, higher smoothing = slower pull
+    if SILENT.on then silent_hook(false) end
+    local mx,my=mouse_pos()
+    local dx,dy=x-mx,y-my
+    local dd=math.sqrt(dx*dx+dy*dy)
+    if dd<=(cfg.aim_dz or 0) then AIML.ax=0; AIML.ay=0; return end  -- deadzone
+    -- soft pull: exponential approach, frame-rate independent. 0 = snap, 100 = very soft
+    local soft=cfg.aim_soft or 10
+    local alpha=1
+    if soft>0 then
+      alpha=1-math.exp(-utility.GetDeltaTime()*90/(1+soft*0.6))
+    end
+    local k=1
+    if cfg.aim_ease then
+      -- ease in: the pull starts gently on a new target and ramps up over 0.4s
+      local t=now()
+      if AIML.ease_a~=rec.tg.a then AIML.ease_a=rec.tg.a; AIML.ease_t=t end
+      local pr=clamp((t-AIML.ease_t)/0.4,0,1)
+      k=pr*pr*(3-2*pr)
+    end
+    -- carry sub-pixel remainders so slow pulls still move the cursor
+    AIML.ax=(AIML.ax or 0)+dx*alpha*k
+    AIML.ay=(AIML.ay or 0)+dy*alpha*k
+    local ix=AIML.ax>=0 and math.floor(AIML.ax) or math.ceil(AIML.ax)
+    local iy=AIML.ay>=0 and math.floor(AIML.ay) or math.ceil(AIML.ay)
+    AIML.ax=AIML.ax-ix; AIML.ay=AIML.ay-iy
+    if ix~=0 or iy~=0 then pcall(utility.MouseMove,ix,iy) end
+    return
+  end
   local origin=aim_origin(v)
   local tp=rec.wpos[bname] or rec.wpos.Head or rec.wpos.HumanoidRootPart
   if origin and tp then
@@ -1317,7 +1452,7 @@ end
 
 local function draw_aim(v)
   if not cfg.aim_on then return end
-  local fov=cfg.aim_fov or 160
+  local fov=eff_fov()
   local x,y=v.mx,v.my
   local c=col.c_fov or {0.45,0.78,1,1}
   if cfg.aim_fovcircle then
@@ -1337,8 +1472,16 @@ local function draw_aim(v)
       pcall(draw.Line,x1,y1,x1-l,y1,c,1.2); pcall(draw.Line,x1,y1,x1,y1-l,c,1.2)
     end
   end
-  if cfg.aim_tline and AIML.target and AIML.x then
-    pcall(draw.Line, v.mx, v.my, AIML.x, AIML.y, col.c_tline or c, 1)
+  if cfg.aim_tline then
+    -- always on while the toggle is on: use the live aim target if aiming, otherwise
+    -- preview the target the aimbot would pick (same FOV and range rules)
+    local tx,ty
+    if AIML.target and AIML.x then tx,ty=AIML.x,AIML.y
+    else
+      local rec,px,py=pick_target(v)
+      if rec then tx,ty=px,py end
+    end
+    if tx then pcall(draw.Line, v.mx, v.my, tx, ty, col.c_tline or c, 1) end
   end
 end
 
